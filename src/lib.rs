@@ -12,7 +12,7 @@ impl Executor {
     }
 
     pub fn block_on<F: Future>(f: F) -> F::Output {
-        let raw_waker = RawWaker::new(core::ptr::null(), &VTABLE);
+        let raw_waker = RawWaker::new(core::ptr::null(), &DUMMY_VTABLE);
         let waker = unsafe { Waker::from_raw(raw_waker) };
         let mut context = Context::from_waker(&waker);
         let mut pinned_f = pin!(f);
@@ -26,8 +26,14 @@ impl Executor {
     }
 }
 
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Dummy waker that never expects to be called
-const VTABLE: RawWakerVTable = RawWakerVTable::new(
+const DUMMY_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| unimplemented!(),
     |_| unimplemented!(),
     |_| unimplemented!(),
@@ -42,9 +48,14 @@ mod tests {
         a + b
     }
 
+    async fn add3(a: i32, b: i32, c: i32) -> i32 {
+        let a_plus_b = add(a, b).await;
+        a_plus_b + c
+    }
+
     #[test]
     fn wait_for_single_coroutine() {
-        let result = Executor::block_on(add(1, 2));
-        assert_eq!(result, 3);
+        let result = Executor::block_on(add3(1, 2, 3));
+        assert_eq!(result, 6);
     }
 }
