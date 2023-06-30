@@ -5,6 +5,7 @@ use crate::timer::get_ticks;
 
 // Sleeping future. For now sleeps until manually woken up.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[must_use = "futures do nothing unless polled"]
 pub struct Sleep {
     wake_at_tick: u32,
 }
@@ -24,5 +25,22 @@ impl Future for Sleep {
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::executor::Executor;
+
+    #[test]
+    fn sleep_and_wake() {
+        let result = Executor::block_on(async {
+            for _ in 0..10 {
+                Executor::sleep(10).await;
+            }
+
+            42
+        });
+        assert_eq!(result, 42);
     }
 }
