@@ -34,9 +34,9 @@ mod tests {
 
     #[test]
     fn sleep_and_wake() {
-        let result = Executor::block_on(async {
+        let result = Executor::<1>::block_on(async {
             for _ in 0..10 {
-                Executor::sleep(10).await;
+                Executor::<1>::sleep(10).await;
             }
 
             42

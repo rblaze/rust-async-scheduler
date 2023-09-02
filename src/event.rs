@@ -59,12 +59,12 @@ mod tests {
 
     #[test]
     fn wait_for_event() {
-        let result = Executor::block_on(async {
+        let result = Executor::<1>::block_on(async {
             let event = Event::new();
 
             join!(
                 async {
-                    Executor::sleep(200).await;
+                    Executor::<1>::sleep(200).await;
                     assert!(!event.is_ready());
                     event.signal();
                     10
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn event_already_signaled() {
-        let result = Executor::block_on(async {
+        let result = Executor::<1>::block_on(async {
             let event = Event::new();
 
             event.signal();

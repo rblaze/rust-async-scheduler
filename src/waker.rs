@@ -3,7 +3,7 @@ use core::task::{RawWaker, RawWakerVTable};
 pub struct SimpleWaker {}
 
 impl SimpleWaker {
-    pub fn new_raw_waker() -> RawWaker {
+    pub const fn new_raw_waker() -> RawWaker {
         RawWaker::new(core::ptr::null(), &SIMPLE_WAKER_VTABLE)
     }
 }
