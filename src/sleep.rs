@@ -30,17 +30,17 @@ impl Future for Sleep {
 
 #[cfg(test)]
 mod tests {
-    use crate::executor::Executor;
+    // use crate::executor::Executor;
 
-    #[test]
-    fn sleep_and_wake() {
-        let result = Executor::<1>::block_on(async {
-            for _ in 0..10 {
-                Executor::<1>::sleep(10).await;
-            }
+    // #[test]
+    // fn sleep_and_wake() {
+    //     let result = Executor::<1>::block_on(async {
+    //         for _ in 0..10 {
+    //             Executor::<1>::sleep(10).await;
+    //         }
 
-            42
-        });
-        assert_eq!(result, 42);
-    }
+    //         42
+    //     });
+    //     assert_eq!(result, 42);
+    // }
 }

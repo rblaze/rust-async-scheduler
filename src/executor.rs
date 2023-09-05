@@ -1,54 +1,63 @@
 use core::future::Future;
-use core::pin::{pin, Pin};
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
-use futures::task::LocalFutureObj;
+use futures::task::FutureObj;
 
 use crate::sleep::Sleep;
 use crate::timer::get_ticks;
-use crate::waker::SimpleWaker;
+use crate::waker::WakerInfo;
 
-// TODO
-// в статические переменные future не запихивается почему-то, надо вводиь lifetimes
-// > как это сделано в embassy не понимаю. Попробовать написать пример этих их _spawn_async_fn медленно с нуля?
-// >> попробовал, без nightly их код не собирается, примеров без макросов нет. В утиль :(
-
-// >> сделать future -> LocalFutureObj -> Task
-// >> изначально таск может быть просто обёрткой
-// >> кажется он будет фиксированного размера, класть его в executor в буфер на N тасков
-//
-// хз что делать с динамическим spawn, может напихать указатели в task
+extern "Rust" {
+    // If flag is 'false', pause the CPU until interrupt or some other wakeup event.
+    // Doing nothing is okay as long as busy-looping is acceptable.
+    // Waiting until flag is set is okay too.
+    fn _sleep_if_false(flag: &mut AtomicBool);
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SpawnError {
-    AlreadySpawned,
     OutOfSpace,
 }
 
 pub struct Executor<'a, const N: usize = 1> {
+    // Space for tasks to run.
     tasks: [Option<Task<'a>>; N],
+    // Set to true when waker for any task is activated.
+    wakeup_event: AtomicBool,
 }
 
 impl<'a, const N: usize> Executor<'a, N> {
     pub fn new() -> Self {
         Self {
             tasks: core::array::from_fn(|_| None),
+            wakeup_event: AtomicBool::new(false),
         }
     }
 
-    pub fn spawn(&mut self, task: Task<'a>) -> Result<(), SpawnError> {
+    pub fn spawn(&mut self, mut task: Task<'a>) -> Result<(), SpawnError> {
         let free_cell = self
             .tasks
             .iter_mut()
             .find(|v| v.is_none())
             .ok_or(SpawnError::OutOfSpace)?;
+
+        task.waker.bind_to_executor(&self.wakeup_event);
         *free_cell = Some(task);
+        self.wakeup_event.store(true, Ordering::Release);
 
         Ok(())
     }
 
     // Run all tasks in the pool to completion.
     pub fn run(&mut self) {
-        while self.run_once() {}
+        while self.run_once() {
+            unsafe {
+                _sleep_if_false(&mut self.wakeup_event);
+            }
+
+            self.wakeup_event.store(false, Ordering::Release);
+        }
     }
 
     // Polls all tasks once
@@ -57,11 +66,13 @@ impl<'a, const N: usize> Executor<'a, N> {
 
         for cell in &mut self.tasks {
             if let Some(task) = cell {
-                let result = task.poll_future();
-                if let Poll::Ready(()) = result {
-                    *cell = None;
-                } else {
-                    any_tasks_left = true;
+                if task.waker.is_task_ready_to_run() {
+                    let result = task.poll_future();
+                    if let Poll::Ready(()) = result {
+                        *cell = None;
+                    } else {
+                        any_tasks_left = true;
+                    }
                 }
             }
         }
@@ -72,45 +83,68 @@ impl<'a, const N: usize> Executor<'a, N> {
     pub fn sleep(duration: u32) -> Sleep {
         Sleep::new(get_ticks() + duration)
     }
-
-    pub fn block_on<F: Future>(f: F) -> F::Output {
-        let raw_waker = SimpleWaker::new_raw_waker();
-        let waker = unsafe { Waker::from_raw(raw_waker) };
-        let mut context = Context::from_waker(&waker);
-        let mut pinned_f = pin!(f);
-
-        loop {
-            match pinned_f.as_mut().poll(&mut context) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => {}
-            }
-        }
-    }
 }
 
 pub struct Task<'a> {
-    future: LocalFutureObj<'a, ()>,
-    waker: Waker,
+    future: FutureObj<'a, ()>,
+    waker: WakerInfo,
 }
 
 impl<'a> Task<'a> {
-    pub fn new(future: LocalFutureObj<'a, ()>) -> Self {
+    pub fn new(future: FutureObj<'a, ()>) -> Self {
         Self {
             future,
-            waker: unsafe { Waker::from_raw(SimpleWaker::new_raw_waker()) },
+            waker: WakerInfo::new(),
         }
     }
 
     pub fn poll_future(&mut self) -> Poll<()> {
-        let mut context = Context::from_waker(&self.waker);
+        let raw_waker = self.waker.into_raw_waker();
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+        let mut context = Context::from_waker(&waker);
+
         Pin::new(&mut self.future).poll(&mut context)
     }
 }
 
 #[cfg(test)]
+const SIMPLE_VTABLE: core::task::RawWakerVTable = core::task::RawWakerVTable::new(
+    |_| unimplemented!(),
+    |_| unimplemented!(),
+    |_| unimplemented!(),
+    |_| {},
+);
+
+#[cfg(test)]
+pub fn block_on<F: Future>(f: F) -> F::Output {
+    use core::task::RawWaker;
+
+    let raw_waker = RawWaker::new(core::ptr::null(), &SIMPLE_VTABLE);
+    let waker = unsafe { Waker::from_raw(raw_waker) };
+    let mut context = Context::from_waker(&waker);
+    let mut pinned_f = core::pin::pin!(f);
+
+    loop {
+        match pinned_f.as_mut().poll(&mut context) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => {}
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use core::pin::pin;
+
     use super::*;
-    use futures::{join, task::LocalFutureObj};
+    use futures::{join, task::FutureObj};
+
+    #[no_mangle]
+    fn _sleep_if_false(flag: &mut AtomicBool) {
+        while !flag.load(Ordering::Acquire) {
+            // Spin
+        }
+    }
 
     async fn add(a: i32, b: i32) -> i32 {
         a + b
@@ -123,7 +157,7 @@ mod tests {
 
     #[test]
     fn wait_for_single_coroutine() {
-        let result = Executor::<1>::block_on(add3(1, 2, 3));
+        let result = block_on(add3(1, 2, 3));
         assert_eq!(result, 6);
     }
 
@@ -131,7 +165,7 @@ mod tests {
     fn wait_for_join() {
         let f1 = add(2, 2);
         let f2 = add3(1, 2, 3);
-        let result = Executor::<3>::block_on(async { join!(f1, f2) });
+        let result = block_on(async { join!(f1, f2) });
         assert_eq!(result, (4, 6));
     }
 
@@ -144,10 +178,10 @@ mod tests {
         let mut v = 0;
         {
             let mut f = pin!(side_effect_add(1, 2, &mut v));
-            let fo = LocalFutureObj::new(&mut f);
+            let fo = FutureObj::new(&mut f);
             let t = Task::new(fo);
 
-            let mut ex = Executor::<1>::new();
+            let mut ex: Executor = Executor::new();
             assert_eq!(ex.spawn(t), Ok(()));
             ex.run();
         }
@@ -163,19 +197,19 @@ mod tests {
         let mut v4 = 0;
         {
             let mut f1 = pin!(side_effect_add(1, 2, &mut v1));
-            let fo1 = LocalFutureObj::new(&mut f1);
+            let fo1 = FutureObj::new(&mut f1);
             let t1 = Task::new(fo1);
 
             let mut f2 = pin!(side_effect_add(3, 4, &mut v2));
-            let fo2 = LocalFutureObj::new(&mut f2);
+            let fo2 = FutureObj::new(&mut f2);
             let t2 = Task::new(fo2);
 
             let mut f3 = pin!(side_effect_add(5, 6, &mut v3));
-            let fo3 = LocalFutureObj::new(&mut f3);
+            let fo3 = FutureObj::new(&mut f3);
             let t3 = Task::new(fo3);
 
             let mut f4 = pin!(side_effect_add(7, 8, &mut v4));
-            let fo4 = LocalFutureObj::new(&mut f4);
+            let fo4 = FutureObj::new(&mut f4);
             let t4 = Task::new(fo4);
 
             let mut ex = Executor::<2>::new();
