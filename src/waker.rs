@@ -1,8 +1,10 @@
+use core::num::NonZeroU32;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{RawWaker, RawWakerVTable};
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WakerError {
-    AlreadyBoundToExecutor,
     TaskIndexOutOfRange,
 }
 
@@ -10,16 +12,21 @@ pub enum WakerError {
 // deleted from the executor list.
 // TODO: refcount Wakers and only delete the task when count drops to zero.
 pub struct WakerInfo {
-    task_mask: u32,
-    executor_ready_mask: *const AtomicU32,
+    task_mask: NonZeroU32,
+    executor_ready_mask: NonNull<AtomicU32>,
 }
 
 impl WakerInfo {
-    pub const fn new() -> Self {
-        Self {
-            task_mask: 0,
-            executor_ready_mask: core::ptr::null(),
-        }
+    // Creates new waker and marks task as ready to run.
+    pub fn new(task_idx: usize, executor_ready_mask: &AtomicU32) -> Result<Self, WakerError> {
+        let task_mask = NonZeroU32::new(1 << task_idx).ok_or(WakerError::TaskIndexOutOfRange)?;
+
+        executor_ready_mask.fetch_or(task_mask.get(), Ordering::Release);
+
+        Ok(Self {
+            task_mask,
+            executor_ready_mask: NonNull::from(executor_ready_mask),
+        })
     }
 
     pub const fn to_raw_waker(&self) -> RawWaker {
@@ -27,36 +34,19 @@ impl WakerInfo {
         RawWaker::new(ptr, &WAKER_VTABLE)
     }
 
-    pub fn bind_to_executor(
-        &mut self,
-        task_idx: usize,
-        executor_ready_mask: &AtomicU32,
-    ) -> Result<(), WakerError> {
-        if self.task_mask != 0 || !self.executor_ready_mask.is_null() {
-            return Err(WakerError::AlreadyBoundToExecutor);
-        }
-        if task_idx >= 32 {
-            return Err(WakerError::TaskIndexOutOfRange);
-        }
-        self.task_mask = 1 << task_idx;
-        self.executor_ready_mask = executor_ready_mask as *const AtomicU32;
-        Ok(())
-    }
+    // Returns true if task is ready to run.
+    // "Ready" bit is cleared after this call.
+    pub fn is_task_runnable(&self) -> bool {
+        // TODO check that current executor is one bound to task
 
-    pub fn is_task_ready_to_run(&self, executor_ready_mask: &AtomicU32) -> bool {
-        debug_assert!(self.task_mask != 0);
-        debug_assert!(self.executor_ready_mask == executor_ready_mask as *const AtomicU32);
-
-        let prev_mask = executor_ready_mask.fetch_and(!self.task_mask, Ordering::AcqRel);
-        prev_mask & self.task_mask != 0
+        let executor_ready_mask = unsafe { self.executor_ready_mask.as_ref() };
+        let prev_mask = executor_ready_mask.fetch_and(!self.task_mask.get(), Ordering::AcqRel);
+        prev_mask & self.task_mask.get() != 0
     }
 
     pub unsafe fn wake_task(&self) {
-        debug_assert!(self.task_mask != 0);
-        debug_assert!(!self.executor_ready_mask.is_null());
-
-        let executor_ready_mask = &*self.executor_ready_mask;
-        executor_ready_mask.fetch_or(self.task_mask, Ordering::Release);
+        let executor_ready_mask = self.executor_ready_mask.as_ref();
+        executor_ready_mask.fetch_or(self.task_mask.get(), Ordering::Release);
     }
 }
 
@@ -87,20 +77,37 @@ mod tests {
         let mask = AtomicU32::new(default_mask);
         let task_idx = 5;
 
-        let mut waker = WakerInfo::new();
-        assert!(waker.bind_to_executor(task_idx, &mask).is_ok());
-        assert_eq!(mask.load(Ordering::Acquire), default_mask);
+        let waker = WakerInfo::new(task_idx, &mask).expect("Waker creation failed");
+        assert_eq!(
+            mask.load(Ordering::Acquire),
+            default_mask | (1 << task_idx),
+            "Runnable bit for task must be set after new()"
+        );
 
-        // Task isn't automatically ready after binding
-        assert!(!waker.is_task_ready_to_run(&mask));
-        assert_eq!(mask.load(Ordering::Acquire), default_mask);
+        assert!(
+            waker.is_task_runnable(),
+            "Task must be runnable when created"
+        );
+        assert_eq!(
+            mask.load(Ordering::Acquire),
+            default_mask,
+            "Runnable bit must be cleared after is_task_runnable()"
+        );
+        assert!(
+            !waker.is_task_runnable(),
+            "Task must not be runnable until wake_task()"
+        );
 
-        // Task is ready to run after waking it
         unsafe { waker.wake_task() };
-        assert_eq!(mask.load(Ordering::Acquire), default_mask | (1 << task_idx));
+        assert_eq!(
+            mask.load(Ordering::Acquire),
+            default_mask | (1 << task_idx),
+            "Runnable bit must be set after wake_task()"
+        );
 
-        assert!(waker.is_task_ready_to_run(&mask));
-        // Task is removed from the mask after check.
-        assert_eq!(mask.load(Ordering::Acquire), default_mask);
+        assert!(
+            waker.is_task_runnable(),
+            "Task must be runnable after wake_task()"
+        );
     }
 }
