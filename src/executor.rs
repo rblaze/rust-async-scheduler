@@ -1,6 +1,6 @@
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{Context, Poll, Waker};
 use futures::task::FutureObj;
 
@@ -9,42 +9,48 @@ use crate::timer::get_ticks;
 use crate::waker::WakerInfo;
 
 extern "Rust" {
-    // If flag is 'false', pause the CPU until interrupt or some other wakeup event.
+    // If mask is zero, pause the CPU until interrupt or some other wakeup event.
     // Doing nothing is okay as long as busy-looping is acceptable.
     // Waiting until flag is set is okay too.
-    fn _sleep_if_false(flag: &mut AtomicBool);
+    fn _sleep_if_zero(mask: &AtomicU32);
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SpawnError {
+    AlreadySpawned,
     OutOfSpace,
 }
 
 pub struct Executor<'a, const N: usize = 1> {
     // Space for tasks to run.
     tasks: [Option<Task<'a>>; N],
-    // Set to true when waker for any task is activated.
-    wakeup_event: AtomicBool,
+    // Bitmask of the tasks than need to be polled.
+    ready_mask: AtomicU32,
 }
 
 impl<'a, const N: usize> Executor<'a, N> {
     pub fn new() -> Self {
         Self {
             tasks: core::array::from_fn(|_| None),
-            wakeup_event: AtomicBool::new(false),
+            ready_mask: AtomicU32::new(0),
         }
     }
 
     pub fn spawn(&mut self, mut task: Task<'a>) -> Result<(), SpawnError> {
-        let free_cell = self
+        let (idx, free_cell) = self
             .tasks
             .iter_mut()
-            .find(|v| v.is_none())
+            .enumerate()
+            .find(|(_, v)| v.is_none())
             .ok_or(SpawnError::OutOfSpace)?;
 
-        task.waker.bind_to_executor(&self.wakeup_event);
+        task.waker
+            .bind_to_executor(idx, &self.ready_mask)
+            .or(Err(SpawnError::AlreadySpawned))?;
         *free_cell = Some(task);
-        self.wakeup_event.store(true, Ordering::Release);
+
+        // Mark task as ready to run.
+        self.ready_mask.fetch_or(1 << idx, Ordering::Release);
 
         Ok(())
     }
@@ -53,10 +59,8 @@ impl<'a, const N: usize> Executor<'a, N> {
     pub fn run(&mut self) {
         while self.run_once() {
             unsafe {
-                _sleep_if_false(&mut self.wakeup_event);
+                _sleep_if_zero(&self.ready_mask);
             }
-
-            self.wakeup_event.store(false, Ordering::Release);
         }
     }
 
@@ -66,7 +70,7 @@ impl<'a, const N: usize> Executor<'a, N> {
 
         for cell in &mut self.tasks {
             if let Some(task) = cell {
-                if task.waker.is_task_ready_to_run() {
+                if task.waker.is_task_ready_to_run(&self.ready_mask) {
                     let result = task.poll_future();
                     if let Poll::Ready(()) = result {
                         *cell = None;
@@ -99,7 +103,7 @@ impl<'a> Task<'a> {
     }
 
     pub fn poll_future(&mut self) -> Poll<()> {
-        let raw_waker = self.waker.into_raw_waker();
+        let raw_waker = self.waker.to_raw_waker();
         let waker = unsafe { Waker::from_raw(raw_waker) };
         let mut context = Context::from_waker(&waker);
 
@@ -140,8 +144,8 @@ mod tests {
     use futures::{join, task::FutureObj};
 
     #[no_mangle]
-    fn _sleep_if_false(flag: &mut AtomicBool) {
-        while !flag.load(Ordering::Acquire) {
+    fn _sleep_if_zero(mask: &AtomicU32) {
+        while mask.load(Ordering::Acquire) == 0 {
             // Spin
         }
     }
@@ -227,7 +231,7 @@ mod tests {
         assert_eq!(v2, 7);
         // This task shouldn't be run
         assert_eq!(v3, 0);
-        // And this should
+        // And this task should
         assert_eq!(v4, 15);
     }
 }

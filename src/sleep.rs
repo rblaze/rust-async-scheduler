@@ -3,7 +3,6 @@ use core::task::{Context, Poll};
 
 use crate::timer::get_ticks;
 
-// Sleeping future. For now sleeps until manually woken up.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Sleep {
