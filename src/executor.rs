@@ -1,11 +1,11 @@
+use core::cell::{Cell, OnceCell};
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::AtomicU32;
 use core::task::{Context, Poll, Waker};
+use critical_section::Mutex;
 use futures::task::FutureObj;
 
-use crate::sleep::Sleep;
-use crate::timer::get_ticks;
 use crate::waker::{WakerError, WakerInfo};
 
 // TODO implement sleep
@@ -20,11 +20,37 @@ use crate::waker::{WakerError, WakerInfo};
 // она не переживёт Task. Хотя можно попробовать станцевать с 'a, может и прокатит...
 // Можно воткнуть указатель, но это unsafe опять :( И так уже многовато в waker.
 
-extern "Rust" {
-    // If mask is zero, pause the CPU until interrupt or some other wakeup event.
-    // Doing nothing is okay as long as busy-looping is acceptable.
-    // Waiting until flag is set is okay too.
-    fn _sleep_if_zero(mask: &AtomicU32);
+pub trait Executor {}
+
+pub trait Environment {
+    fn sleep_if_zero(&self, mask: &AtomicU32);
+    fn ticks(&self) -> u32;
+    fn enter_executor(&self, executor: &dyn Executor);
+    fn leave_executor(&self);
+    fn current_executor(&self) -> Option<&dyn Executor>;
+}
+
+static ENV: Mutex<OnceCell<&'static (dyn Environment + Sync)>> = Mutex::new(OnceCell::new());
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum EnvError {
+    AlreadyInitialized,
+    Uninitialized,
+}
+
+/// Sets executor environment.
+/// Must be called before calling run() for any executor
+pub fn set_environment(env: &'static (dyn Environment + Sync)) -> Result<(), EnvError> {
+    critical_section::with(|cs| {
+        ENV.borrow(cs)
+            .set(env)
+            .or(Err(EnvError::AlreadyInitialized))
+    })
+}
+
+fn environment() -> &'static (dyn Environment + Sync) {
+    critical_section::with(|cs| ENV.borrow(cs).get().ok_or(EnvError::Uninitialized).copied())
+        .unwrap()
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -38,14 +64,14 @@ struct TaskInfo<'a> {
     waker: WakerInfo,
 }
 
-pub struct Executor<'a, const N: usize = 1> {
+pub struct LocalExecutor<'a, const N: usize = 1> {
     // Space for tasks to run.
     tasks: [Option<TaskInfo<'a>>; N],
     // Bitmask of the tasks than need to be polled.
     ready_mask: AtomicU32,
 }
 
-impl<'a, const N: usize> Executor<'a, N> {
+impl<'a, const N: usize> LocalExecutor<'a, N> {
     pub fn new() -> Self {
         Self {
             tasks: core::array::from_fn(|_| None),
@@ -64,6 +90,7 @@ impl<'a, const N: usize> Executor<'a, N> {
         *free_cell = Some(TaskInfo {
             future: task,
             waker: WakerInfo::new(idx, &self.ready_mask).map_err(SpawnError::Waker)?,
+            sleep_until: Cell::new(None),
         });
 
         Ok(())
@@ -72,9 +99,7 @@ impl<'a, const N: usize> Executor<'a, N> {
     // Run all tasks in the pool to completion.
     pub fn run(&mut self) {
         while self.run_once() {
-            unsafe {
-                _sleep_if_zero(&self.ready_mask);
-            }
+            environment().sleep_if_zero(&self.ready_mask);
         }
     }
 
@@ -82,6 +107,7 @@ impl<'a, const N: usize> Executor<'a, N> {
     fn run_once(&mut self) -> bool {
         let mut any_tasks_left = false;
 
+        environment().enter_executor(self);
         for cell in &mut self.tasks {
             if let Some(task) = cell {
                 if task.waker.is_task_runnable() {
@@ -97,20 +123,17 @@ impl<'a, const N: usize> Executor<'a, N> {
                 }
             }
         }
+        environment().leave_executor();
 
         any_tasks_left
     }
 
-    pub fn sleep(duration: u32) -> Sleep {
-        Sleep::new(get_ticks() + duration)
-    }
+    // pub fn sleep(&self, duration: u32) -> Sleep {
+    //     Sleep::new(&self.system.get_ticks() + duration)
+    // }
 }
 
-impl<'a, const N: usize> Default for Executor<'a, N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {}
 
 #[cfg(test)]
 const SIMPLE_VTABLE: core::task::RawWakerVTable = core::task::RawWakerVTable::new(
@@ -140,16 +163,16 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
 #[cfg(test)]
 mod tests {
     use core::pin::pin;
-    use core::sync::atomic::Ordering;
+
+    use crate::test_environment::TestEnvironment;
 
     use super::*;
     use futures::{join, task::FutureObj};
 
-    #[no_mangle]
-    fn _sleep_if_zero(mask: &AtomicU32) {
-        while mask.load(Ordering::Acquire) == 0 {
-            // Spin
-        }
+    static TESTENV: TestEnvironment = TestEnvironment::new();
+
+    fn setup() {
+        let _ = set_environment(&TESTENV);
     }
 
     async fn add(a: i32, b: i32) -> i32 {
@@ -181,12 +204,13 @@ mod tests {
 
     #[test]
     fn test_spawn() {
+        setup();
         let mut v = 0;
         {
             let mut f = pin!(side_effect_add(1, 2, &mut v));
             let fo = FutureObj::new(&mut f);
 
-            let mut ex: Executor = Executor::new();
+            let mut ex: LocalExecutor = LocalExecutor::new();
             assert_eq!(ex.spawn(fo), Ok(()));
             ex.run();
         }
@@ -196,6 +220,7 @@ mod tests {
 
     #[test]
     fn test_spawn_overflow() {
+        setup();
         let mut v1 = 0;
         let mut v2 = 0;
         let mut v3 = 0;
@@ -213,7 +238,7 @@ mod tests {
             let mut f4 = pin!(side_effect_add(7, 8, &mut v4));
             let fo4 = FutureObj::new(&mut f4);
 
-            let mut ex = Executor::<2>::new();
+            let mut ex = LocalExecutor::<2>::new();
             assert_eq!(ex.spawn(fo1), Ok(()));
             assert_eq!(ex.spawn(fo2), Ok(()));
             // No more free cells

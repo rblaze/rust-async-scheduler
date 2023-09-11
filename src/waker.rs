@@ -17,7 +17,7 @@ pub struct WakerInfo {
 }
 
 impl WakerInfo {
-    // Creates new waker and marks task as ready to run.
+    /// Creates new waker and marks task as ready to run.
     pub fn new(task_idx: usize, executor_ready_mask: &AtomicU32) -> Result<Self, WakerError> {
         let task_mask = NonZeroU32::new(1 << task_idx).ok_or(WakerError::TaskIndexOutOfRange)?;
 
@@ -34,8 +34,8 @@ impl WakerInfo {
         RawWaker::new(ptr, &WAKER_VTABLE)
     }
 
-    // Returns true if task is ready to run.
-    // "Ready" bit is cleared after this call.
+    /// Returns true if task is ready to run.
+    /// "Ready" bit is cleared after this call.
     pub fn is_task_runnable(&self) -> bool {
         // TODO check that current executor is one bound to task
 

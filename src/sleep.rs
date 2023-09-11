@@ -1,8 +1,6 @@
 use core::future::Future;
 use core::task::{Context, Poll};
 
-use crate::timer::get_ticks;
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Sleep {
@@ -19,9 +17,9 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if get_ticks() >= self.wake_at_tick {
-            return Poll::Ready(());
-        }
+        // if get_ticks() >= self.wake_at_tick {
+        //     return Poll::Ready(());
+        // }
 
         Poll::Pending
     }

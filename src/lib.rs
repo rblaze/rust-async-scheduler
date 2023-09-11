@@ -2,5 +2,7 @@
 
 pub mod executor;
 mod sleep;
-mod timer;
 mod waker;
+
+#[cfg(test)]
+mod test_environment;
