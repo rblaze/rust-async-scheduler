@@ -8,7 +8,7 @@ pub struct Sleep {
 }
 
 impl Sleep {
-    pub fn new(wake_at_tick: u32) -> Self {
+    pub(crate) fn new(wake_at_tick: u32) -> Self {
         Sleep { wake_at_tick }
     }
 }
@@ -16,28 +16,27 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // if get_ticks() >= self.wake_at_tick {
-        //     return Poll::Ready(());
-        // }
-
-        Poll::Pending
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        crate::executor::check_sleep(self.wake_at_tick, cx.waker())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // use crate::executor::Executor;
+    use crate::test_utils::block_on;
 
-    // #[test]
-    // fn sleep_and_wake() {
-    //     let result = Executor::<1>::block_on(async {
-    //         for _ in 0..10 {
-    //             Executor::<1>::sleep(10).await;
-    //         }
+    #[test]
+    fn sleep_and_wake() {
+        let v = block_on(async {
+            for _ in 0..10 {
+                println!("iter enter");
+                crate::executor::sleep(10).await;
+                println!("iter exit");
+            }
 
-    //         42
-    //     });
-    //     assert_eq!(result, 42);
-    // }
+            42
+        });
+
+        assert_eq!(v, 42);
+    }
 }

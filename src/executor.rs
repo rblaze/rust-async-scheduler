@@ -6,21 +6,13 @@ use core::task::{Context, Poll, Waker};
 use critical_section::Mutex;
 use futures::task::FutureObj;
 
+use crate::sleep::Sleep;
 use crate::waker::{WakerError, WakerInfo};
 
-// TODO implement sleep
-// Таймер так или иначе будет будить процессор. Можно не морочиться с прерываниями,
-// а обрабатывать очередь таймера в основном цикле.
-// Тривиальное решение: добавить в каждый таск поле "ready at", будить по нему.
-// Проблема: что делать если в таске несколько sleep, склеенных через join?
-// Решение: они могут обновлять поле ready at, ставить своё время туда если оно меньше,
-// чем у нынешнего кандидата. Future должно будет хранить собственное время и ссылку
-// на таск.
-// Недостаток: ссылку скорее всего не воткнёшь, потому что нет никакой гарантии, что
-// она не переживёт Task. Хотя можно попробовать станцевать с 'a, может и прокатит...
-// Можно воткнуть указатель, но это unsafe опять :( И так уже многовато в waker.
-
-pub trait Executor {}
+pub trait Executor {
+    fn sleep(&self, duration: u32) -> Sleep;
+    fn mark_sleep(&self, wake_at: u32, waker: &Waker);
+}
 
 pub trait Environment {
     fn sleep_if_zero(&self, mask: &AtomicU32);
@@ -53,6 +45,23 @@ fn environment() -> &'static (dyn Environment + Sync) {
         .unwrap()
 }
 
+/// enter_executor/leave_executor guard
+struct Enter {}
+
+impl Enter {
+    /// Registers executor with environment and returns guard struct to unregister it.
+    pub fn new(executor: &dyn Executor) -> Self {
+        environment().enter_executor(executor);
+        Self {}
+    }
+}
+
+impl Drop for Enter {
+    fn drop(&mut self) {
+        environment().leave_executor();
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SpawnError {
     OutOfSpace,
@@ -62,6 +71,7 @@ pub enum SpawnError {
 struct TaskInfo<'a> {
     future: FutureObj<'a, ()>,
     waker: WakerInfo,
+    sleep_until: Cell<Option<u32>>,
 }
 
 pub struct LocalExecutor<'a, const N: usize = 1> {
@@ -69,6 +79,12 @@ pub struct LocalExecutor<'a, const N: usize = 1> {
     tasks: [Option<TaskInfo<'a>>; N],
     // Bitmask of the tasks than need to be polled.
     ready_mask: AtomicU32,
+}
+
+impl<'a, const N: usize> Default for LocalExecutor<'a, N> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a, const N: usize> LocalExecutor<'a, N> {
@@ -107,56 +123,70 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
     fn run_once(&mut self) -> bool {
         let mut any_tasks_left = false;
 
-        environment().enter_executor(self);
+        let _enter = Enter::new(self);
         for cell in &mut self.tasks {
             if let Some(task) = cell {
-                if task.waker.is_task_runnable() {
+                if task.waker.is_task_runnable()
+                    || task
+                        .sleep_until
+                        .get()
+                        .is_some_and(|ticks| ticks <= environment().ticks())
+                {
                     let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
                     let mut context = Context::from_waker(&waker);
 
                     let result = Pin::new(&mut task.future).poll(&mut context);
                     if let Poll::Ready(()) = result {
                         *cell = None;
-                    } else {
-                        any_tasks_left = true;
                     }
+                }
+
+                if cell.is_some() {
+                    any_tasks_left = true;
                 }
             }
         }
-        environment().leave_executor();
 
         any_tasks_left
     }
-
-    // pub fn sleep(&self, duration: u32) -> Sleep {
-    //     Sleep::new(&self.system.get_ticks() + duration)
-    // }
 }
 
-impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {}
+impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {
+    fn sleep(&self, duration: u32) -> Sleep {
+        Sleep::new(environment().ticks() + duration)
+    }
 
-#[cfg(test)]
-const SIMPLE_VTABLE: core::task::RawWakerVTable = core::task::RawWakerVTable::new(
-    |_| unimplemented!(),
-    |_| unimplemented!(),
-    |_| unimplemented!(),
-    |_| {},
-);
+    fn mark_sleep(&self, wake_at: u32, waker: &Waker) {
+        let task = self
+            .tasks
+            .iter()
+            .flatten()
+            .find(|task| (unsafe { Waker::from_raw(task.waker.to_raw_waker()) }).will_wake(waker))
+            .expect("can't find task from waker");
 
-#[cfg(test)]
-pub fn block_on<F: Future>(f: F) -> F::Output {
-    use core::task::RawWaker;
-
-    let raw_waker = RawWaker::new(core::ptr::null(), &SIMPLE_VTABLE);
-    let waker = unsafe { Waker::from_raw(raw_waker) };
-    let mut context = Context::from_waker(&waker);
-    let mut pinned_f = core::pin::pin!(f);
-
-    loop {
-        match pinned_f.as_mut().poll(&mut context) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => {}
+        if task.sleep_until.get().unwrap_or(u32::MAX) > wake_at {
+            task.sleep_until.set(Some(wake_at));
         }
+    }
+}
+
+pub fn sleep(duration: u32) -> Sleep {
+    environment()
+        .current_executor()
+        .expect("sleep() called outside of a coroutine")
+        .sleep(duration)
+}
+
+pub(crate) fn check_sleep(wake_at: u32, waker: &Waker) -> Poll<()> {
+    if environment().ticks() >= wake_at {
+        Poll::Ready(())
+    } else {
+        // If wake time is more recent than other sleeps in this task, save it.
+        environment()
+            .current_executor()
+            .expect("check_sleep() called outside of a coroutine")
+            .mark_sleep(wake_at, waker);
+        Poll::Pending
     }
 }
 
@@ -164,38 +194,13 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
 mod tests {
     use core::pin::pin;
 
-    use crate::test_environment::TestEnvironment;
+    use crate::test_utils::setup;
 
     use super::*;
-    use futures::{join, task::FutureObj};
-
-    static TESTENV: TestEnvironment = TestEnvironment::new();
-
-    fn setup() {
-        let _ = set_environment(&TESTENV);
-    }
+    use futures::task::FutureObj;
 
     async fn add(a: i32, b: i32) -> i32 {
         a + b
-    }
-
-    async fn add3(a: i32, b: i32, c: i32) -> i32 {
-        let a_plus_b = add(a, b).await;
-        a_plus_b + c
-    }
-
-    #[test]
-    fn wait_for_single_coroutine() {
-        let result = block_on(add3(1, 2, 3));
-        assert_eq!(result, 6);
-    }
-
-    #[test]
-    fn wait_for_join() {
-        let f1 = add(2, 2);
-        let f2 = add3(1, 2, 3);
-        let result = block_on(async { join!(f1, f2) });
-        assert_eq!(result, (4, 6));
     }
 
     async fn side_effect_add(a: i32, b: i32, ret: &mut i32) {

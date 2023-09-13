@@ -11,6 +11,7 @@ pub enum WakerError {
 // Problem here: Waker can be cloned and outlive the task after it is
 // deleted from the executor list.
 // TODO: refcount Wakers and only delete the task when count drops to zero.
+#[derive(Debug)]
 pub struct WakerInfo {
     task_mask: NonZeroU32,
     executor_ready_mask: NonNull<AtomicU32>,
@@ -19,7 +20,10 @@ pub struct WakerInfo {
 impl WakerInfo {
     /// Creates new waker and marks task as ready to run.
     pub fn new(task_idx: usize, executor_ready_mask: &AtomicU32) -> Result<Self, WakerError> {
-        let task_mask = NonZeroU32::new(1 << task_idx).ok_or(WakerError::TaskIndexOutOfRange)?;
+        let mask = 1u32
+            .checked_shl(task_idx as u32)
+            .ok_or(WakerError::TaskIndexOutOfRange)?;
+        let task_mask = NonZeroU32::new(mask).ok_or(WakerError::TaskIndexOutOfRange)?;
 
         executor_ready_mask.fetch_or(task_mask.get(), Ordering::Release);
 
@@ -109,5 +113,15 @@ mod tests {
             waker.is_task_runnable(),
             "Task must be runnable after wake_task()"
         );
+    }
+
+    #[test]
+    fn test_waker_error() {
+        let default_mask = 1 | (1 << 2) | (1 << 7);
+        let mask = AtomicU32::new(default_mask);
+
+        let result = WakerInfo::new(32, &mask);
+        assert!(result.is_err(), "Waker must detect task mask overflow");
+        assert_eq!(result.unwrap_err(), WakerError::TaskIndexOutOfRange);
     }
 }

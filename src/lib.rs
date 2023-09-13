@@ -5,4 +5,4 @@ mod sleep;
 mod waker;
 
 #[cfg(test)]
-mod test_environment;
+mod test_utils;
