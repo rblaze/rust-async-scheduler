@@ -1,0 +1,36 @@
+on: [push]
+
+name: Auto build
+
+jobs:
+  fmt:
+    name: "Run rustfmt and clippy"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: "Install toolchain"
+        run: rustup toolchain install stable --profile minimal -c rustfmt,clippy
+      - name: "Check formatting"
+        run: cargo fmt --all --check
+      - name: "Run clippy"
+        run: cargo clippy --no-deps -- -D warnings
+
+  test:
+    name: "Run unittests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: "Install toolchain"
+        run: rustup toolchain install stable
+      - name: "Run tests"
+        run: cargo test
+
+  build:
+    name: "Build (no-std)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: "Install toolchain"
+        run: rustup toolchain install stable
+      - name: "Build"
+        run: cargo build
