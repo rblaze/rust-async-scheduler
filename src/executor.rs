@@ -4,7 +4,7 @@ use core::pin::Pin;
 use core::sync::atomic::AtomicU32;
 use core::task::{Context, Poll, Waker};
 use critical_section::Mutex;
-use futures::task::FutureObj;
+use futures::task::LocalFutureObj;
 
 use crate::sleep::Sleep;
 use crate::waker::{WakerError, WakerInfo};
@@ -69,7 +69,7 @@ pub enum SpawnError {
 }
 
 struct TaskInfo<'a> {
-    future: FutureObj<'a, ()>,
+    future: LocalFutureObj<'a, ()>,
     waker: WakerInfo,
     sleep_until: Cell<Option<u32>>,
 }
@@ -95,7 +95,7 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
         }
     }
 
-    pub fn spawn(&mut self, task: FutureObj<'a, ()>) -> Result<(), SpawnError> {
+    pub fn spawn(&mut self, task: LocalFutureObj<'a, ()>) -> Result<(), SpawnError> {
         let (idx, free_cell) = self
             .tasks
             .iter_mut()
@@ -197,7 +197,7 @@ mod tests {
     use crate::test_utils::setup;
 
     use super::*;
-    use futures::task::FutureObj;
+    use futures::task::LocalFutureObj;
 
     async fn add(a: i32, b: i32) -> i32 {
         a + b
@@ -213,7 +213,7 @@ mod tests {
         let mut v = 0;
         {
             let mut f = pin!(side_effect_add(1, 2, &mut v));
-            let fo = FutureObj::new(&mut f);
+            let fo = LocalFutureObj::new(&mut f);
 
             let mut ex: LocalExecutor = LocalExecutor::new();
             assert_eq!(ex.spawn(fo), Ok(()));
@@ -232,16 +232,16 @@ mod tests {
         let mut v4 = 0;
         {
             let mut f1 = pin!(side_effect_add(1, 2, &mut v1));
-            let fo1 = FutureObj::new(&mut f1);
+            let fo1 = LocalFutureObj::new(&mut f1);
 
             let mut f2 = pin!(side_effect_add(3, 4, &mut v2));
-            let fo2 = FutureObj::new(&mut f2);
+            let fo2 = LocalFutureObj::new(&mut f2);
 
             let mut f3 = pin!(side_effect_add(5, 6, &mut v3));
-            let fo3 = FutureObj::new(&mut f3);
+            let fo3 = LocalFutureObj::new(&mut f3);
 
             let mut f4 = pin!(side_effect_add(7, 8, &mut v4));
-            let fo4 = FutureObj::new(&mut f4);
+            let fo4 = LocalFutureObj::new(&mut f4);
 
             let mut ex = LocalExecutor::<2>::new();
             assert_eq!(ex.spawn(fo1), Ok(()));

@@ -69,7 +69,7 @@ pub fn block_on<R: Send + Default>(future: impl futures::Future<Output = R> + Se
     let mut r: R = Default::default();
     {
         let f = core::pin::pin!(run_and_set(&mut r, future));
-        let fo = futures::task::FutureObj::new(f);
+        let fo = futures::task::LocalFutureObj::new(f);
 
         let mut ex: LocalExecutor<'_, 1> = LocalExecutor::new();
         assert_eq!(ex.spawn(fo), Ok(()));
