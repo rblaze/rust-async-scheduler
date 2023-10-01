@@ -1,5 +1,7 @@
-use core::cell::Cell;
+use core::{cell::Cell, mem::MaybeUninit};
 use std::sync::Once;
+
+use futures::Future;
 
 use crate::executor::{Environment, LocalExecutor};
 
@@ -60,20 +62,24 @@ pub fn setup() {
     });
 }
 
-async fn run_and_set<R: Send>(result: &mut R, future: impl futures::Future<Output = R> + Send) {
-    *result = future.await;
+pub async fn assign<T, F: Future<Output = T>>(dest: &mut T, src: F) {
+    *dest = src.await;
 }
 
-pub fn block_on<R: Send + Default>(future: impl futures::Future<Output = R> + Send) -> R {
+async fn write<T, F: Future<Output = T>>(dest: &mut MaybeUninit<T>, src: F) {
+    dest.write(src.await);
+}
+
+pub fn block_on<T>(future: impl Future<Output = T>) -> T {
     let _ = setup();
-    let mut r: R = Default::default();
+    let mut ret: MaybeUninit<T> = MaybeUninit::uninit();
     {
-        let f = core::pin::pin!(run_and_set(&mut r, future));
+        let f = core::pin::pin!(write(&mut ret, future));
         let fo = futures::task::LocalFutureObj::new(f);
 
         let mut ex: LocalExecutor<'_, 1> = LocalExecutor::new();
         assert_eq!(ex.spawn(fo), Ok(()));
         ex.run();
     }
-    r
+    unsafe { ret.assume_init() }
 }

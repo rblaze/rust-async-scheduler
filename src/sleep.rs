@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use core::future::Future;
 use core::task::{Context, Poll};
 
@@ -9,7 +11,7 @@ pub struct Sleep {
 
 impl Sleep {
     pub(crate) fn new(wake_at_tick: u32) -> Self {
-        Sleep { wake_at_tick }
+        Self { wake_at_tick }
     }
 }
 
