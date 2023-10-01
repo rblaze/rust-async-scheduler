@@ -2,6 +2,7 @@
 
 pub mod executor;
 pub mod mailbox;
+pub mod sync;
 mod sleep;
 mod waker;
 
