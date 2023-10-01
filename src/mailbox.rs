@@ -52,8 +52,8 @@ impl<T> Mailbox<T> {
         old_value
     }
 
-    /// Waits for value to be posted.
-    pub async fn wait(&self) -> Result<T, Error> {
+    /// Waits for value to be posted and returns it.
+    pub async fn read(&self) -> Result<T, Error> {
         let waker = self.waker.take();
         if let Some(waker) = waker {
             // Mailbox busy.
@@ -97,13 +97,13 @@ mod tests {
     use crate::executor::LocalExecutor;
     use crate::test_utils::{assign, block_on};
 
-    async fn post_and_wait<T, U>(mbox1: &Mailbox<T>, value: T, mbox2: &Mailbox<U>) -> U {
+    async fn post_and_read<T, U>(mbox1: &Mailbox<T>, value: T, mbox2: &Mailbox<U>) -> U {
         mbox1.post(value);
-        mbox2.wait().await.unwrap()
+        mbox2.read().await.unwrap()
     }
 
-    async fn wait_and_post<T, U>(mbox1: &Mailbox<T>, mbox2: &Mailbox<U>, value: U) -> T {
-        let t = mbox1.wait().await.unwrap();
+    async fn read_and_post<T, U>(mbox1: &Mailbox<T>, mbox2: &Mailbox<U>, value: U) -> T {
+        let t = mbox1.read().await.unwrap();
         mbox2.post(value);
 
         t
@@ -116,8 +116,8 @@ mod tests {
 
         let (t, u) = block_on(async {
             join!(
-                post_and_wait(&mbox1, 42, &mbox2),
-                wait_and_post(&mbox1, &mbox2, "hello")
+                post_and_read(&mbox1, 42, &mbox2),
+                read_and_post(&mbox1, &mbox2, "hello")
             )
         });
 
@@ -134,8 +134,8 @@ mod tests {
             let mut v = 0;
             for i in 0..10 {
                 (_, v) = join!(
-                    post_and_wait(&mbox1, i, &mbox2),
-                    wait_and_post(&mbox1, &mbox2, "hello")
+                    post_and_read(&mbox1, i, &mbox2),
+                    read_and_post(&mbox1, &mbox2, "hello")
                 );
             }
             v
@@ -153,10 +153,10 @@ mod tests {
             let mbox1 = Mailbox::<i32>::new();
             let mbox2 = Mailbox::<&'static str>::new();
 
-            let mut f1 = pin!(assign(&mut u, wait_and_post(&mbox1, &mbox2, "hello")));
+            let mut f1 = pin!(assign(&mut u, read_and_post(&mbox1, &mbox2, "hello")));
             let fo1 = LocalFutureObj::new(&mut f1);
 
-            let mut f2 = pin!(assign(&mut t, post_and_wait(&mbox1, 42, &mbox2)));
+            let mut f2 = pin!(assign(&mut t, post_and_read(&mbox1, 42, &mbox2)));
             let fo2 = LocalFutureObj::new(&mut f2);
 
             let mut ex = LocalExecutor::<2>::new();
@@ -170,13 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn double_wait_returns_error() {
+    fn double_read_returns_error() {
         let mbox = Mailbox::<i32>::new();
 
         let (t, u, w) = block_on(async {
             join!(
-                async { mbox.wait().await },
-                async { mbox.wait().await },
+                async { mbox.read().await },
+                async { mbox.read().await },
                 async { mbox.post(42) }
             )
         });
