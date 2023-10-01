@@ -34,7 +34,7 @@ impl<T> Default for Mailbox<T> {
 
 impl<T> Mailbox<T> {
     /// Creates empty mailbox.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             value: Cell::new(None),
             waker: Cell::new(None),

@@ -30,7 +30,7 @@ impl<T> Default for Mailbox<T> {
 
 impl<T> Mailbox<T> {
     /// Creates empty mailbox.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             value: Mutex::new(Cell::new(None)),
             waker: Mutex::new(Cell::new(None)),
