@@ -1,10 +1,10 @@
 use core::cell::{Cell, OnceCell};
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::AtomicU32;
 use core::task::{Context, Poll, Waker};
 use critical_section::Mutex;
 use futures::task::LocalFutureObj;
+use portable_atomic::AtomicU32;
 
 use crate::sleep::Sleep;
 use crate::waker::{WakerError, WakerInfo};

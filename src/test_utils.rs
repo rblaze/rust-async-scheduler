@@ -13,7 +13,7 @@ thread_local! {
 }
 
 impl Environment for TestEnvironment {
-    fn sleep_if_zero(&self, _mask: &core::sync::atomic::AtomicU32) {
+    fn sleep_if_zero(&self, _mask: &portable_atomic::AtomicU32) {
         // No-op to allow timer to tick
     }
 

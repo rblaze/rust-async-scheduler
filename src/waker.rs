@@ -1,7 +1,7 @@
 use core::num::NonZeroU32;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{RawWaker, RawWakerVTable};
+use portable_atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WakerError {
