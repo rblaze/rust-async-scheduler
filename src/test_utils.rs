@@ -77,9 +77,7 @@ pub fn block_on<T>(future: impl Future<Output = T>) -> T {
         let f = core::pin::pin!(write(&mut ret, future));
         let fo = futures::task::LocalFutureObj::new(f);
 
-        let mut ex: LocalExecutor<'_, 1> = LocalExecutor::new();
-        assert_eq!(ex.spawn(fo), Ok(()));
-        ex.run();
+        LocalExecutor::new().run([fo]);
     }
     unsafe { ret.assume_init() }
 }

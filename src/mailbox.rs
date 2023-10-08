@@ -159,10 +159,7 @@ mod tests {
             let mut f2 = pin!(assign(&mut t, post_and_read(&mbox1, 42, &mbox2)));
             let fo2 = LocalFutureObj::new(&mut f2);
 
-            let mut ex = LocalExecutor::<2>::new();
-            assert_eq!(ex.spawn(fo1), Ok(()));
-            assert_eq!(ex.spawn(fo2), Ok(()));
-            ex.run();
+            LocalExecutor::new().run([fo1, fo2]);
         }
 
         assert_eq!(t, "hello");

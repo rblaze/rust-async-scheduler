@@ -64,30 +64,28 @@ impl Drop for Enter {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SpawnError {
-    OutOfSpace,
     Waker(WakerError),
 }
 
-struct TaskInfo<'a> {
-    future: LocalFutureObj<'a, ()>,
+struct TaskInfo {
     waker: WakerInfo,
     sleep_until: Cell<Option<u32>>,
 }
 
-pub struct LocalExecutor<'a, const N: usize = 1> {
+pub struct LocalExecutor<const N: usize> {
     // Space for tasks to run.
-    tasks: [Option<TaskInfo<'a>>; N],
+    tasks: [Option<TaskInfo>; N],
     // Bitmask of the tasks than need to be polled.
     ready_mask: AtomicU32,
 }
 
-impl<'a, const N: usize> Default for LocalExecutor<'a, N> {
+impl<const N: usize> Default for LocalExecutor<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a, const N: usize> LocalExecutor<'a, N> {
+impl<const N: usize> LocalExecutor<N> {
     pub fn new() -> Self {
         Self {
             tasks: core::array::from_fn(|_| None),
@@ -95,36 +93,26 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
         }
     }
 
-    pub fn spawn(&mut self, task: LocalFutureObj<'a, ()>) -> Result<(), SpawnError> {
-        let (idx, free_cell) = self
-            .tasks
-            .iter_mut()
-            .enumerate()
-            .find(|(_, v)| v.is_none())
-            .ok_or(SpawnError::OutOfSpace)?;
+    // Run all futures to completion.
+    pub fn run(&mut self, mut futures: [LocalFutureObj<'_, ()>; N]) {
+        for index in 0..N {
+            self.tasks[index] = Some(TaskInfo {
+                waker: WakerInfo::new(index, &self.ready_mask).unwrap(),
+                sleep_until: Cell::new(None),
+            });
+        }
 
-        *free_cell = Some(TaskInfo {
-            future: task,
-            waker: WakerInfo::new(idx, &self.ready_mask).map_err(SpawnError::Waker)?,
-            sleep_until: Cell::new(None),
-        });
-
-        Ok(())
-    }
-
-    // Run all tasks in the pool to completion.
-    pub fn run(&mut self) {
-        while self.run_once() {
+        while self.run_once(&mut futures) {
             environment().sleep_if_zero(&self.ready_mask);
         }
     }
 
     // Polls all tasks once
-    fn run_once(&mut self) -> bool {
+    fn run_once(&mut self, futures: &mut [LocalFutureObj<'_, ()>; N]) -> bool {
         let mut any_tasks_left = false;
 
         let _enter = Enter::new(self);
-        for cell in &mut self.tasks {
+        for (future, cell) in futures.iter_mut().zip(self.tasks.iter_mut()) {
             if let Some(task) = cell {
                 if task.waker.is_task_runnable()
                     || task
@@ -135,7 +123,7 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
                     let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
                     let mut context = Context::from_waker(&waker);
 
-                    let result = Pin::new(&mut task.future).poll(&mut context);
+                    let result = Pin::new(future).poll(&mut context);
                     if let Poll::Ready(()) = result {
                         *cell = None;
                     }
@@ -151,7 +139,7 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
     }
 }
 
-impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {
+impl<const N: usize> Executor for LocalExecutor<N> {
     fn sleep(&self, duration: u32) -> Sleep {
         Sleep::new(environment().ticks() + duration)
     }
@@ -215,50 +203,9 @@ mod tests {
             let mut f = pin!(side_effect_add(1, 2, &mut v));
             let fo = LocalFutureObj::new(&mut f);
 
-            let mut ex: LocalExecutor = LocalExecutor::new();
-            assert_eq!(ex.spawn(fo), Ok(()));
-            ex.run();
+            LocalExecutor::new().run([fo]);
         }
         // Check that task was actually run
         assert_eq!(v, 3);
-    }
-
-    #[test]
-    fn test_spawn_overflow() {
-        setup();
-        let mut v1 = 0;
-        let mut v2 = 0;
-        let mut v3 = 0;
-        let mut v4 = 0;
-        {
-            let mut f1 = pin!(side_effect_add(1, 2, &mut v1));
-            let fo1 = LocalFutureObj::new(&mut f1);
-
-            let mut f2 = pin!(side_effect_add(3, 4, &mut v2));
-            let fo2 = LocalFutureObj::new(&mut f2);
-
-            let mut f3 = pin!(side_effect_add(5, 6, &mut v3));
-            let fo3 = LocalFutureObj::new(&mut f3);
-
-            let mut f4 = pin!(side_effect_add(7, 8, &mut v4));
-            let fo4 = LocalFutureObj::new(&mut f4);
-
-            let mut ex = LocalExecutor::<2>::new();
-            assert_eq!(ex.spawn(fo1), Ok(()));
-            assert_eq!(ex.spawn(fo2), Ok(()));
-            // No more free cells
-            assert_eq!(ex.spawn(fo3), Err(SpawnError::OutOfSpace));
-            ex.run();
-            // Now we can spawn again
-            assert_eq!(ex.spawn(fo4), Ok(()));
-            ex.run();
-        }
-        // Check that task was actually run
-        assert_eq!(v1, 3);
-        assert_eq!(v2, 7);
-        // This task shouldn't be run
-        assert_eq!(v3, 0);
-        // And this task should
-        assert_eq!(v4, 15);
     }
 }
