@@ -18,8 +18,8 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        crate::executor::check_sleep(self.wake_at_tick, cx.waker())
+    fn poll(self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        crate::executor::check_sleep(self.wake_at_tick)
     }
 }
 

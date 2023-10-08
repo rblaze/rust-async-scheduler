@@ -11,10 +11,11 @@ use crate::waker::{WakerError, WakerInfo};
 
 pub trait Executor {
     fn sleep(&self, duration: u32) -> Sleep;
-    fn mark_sleep(&self, wake_at: u32, waker: &Waker);
+    fn request_wakeup(&self, wake_at: u32);
 }
 
 pub trait Environment {
+    /// If `mask` is zero, sleeps until timer event occurs.
     fn sleep_if_zero(&self, mask: &AtomicU32);
     fn ticks(&self) -> u32;
     fn enter_executor(&self, executor: &dyn Executor);
@@ -72,11 +73,32 @@ struct TaskInfo {
     sleep_until: Cell<Option<u32>>,
 }
 
+enum RunResult {
+    /// Wait for wakeup event or specified time
+    WaitForTick(u32),
+    /// No active timeouts, wait for wakeup event
+    WaitForEvent,
+    /// No pending tasks left
+    NoMoreTasks,
+}
+
+impl RunResult {
+    /// Map enum to tuple for automatic Eq/Ord
+    fn tuple(&self) -> (u32, u32) {
+        match self {
+            RunResult::WaitForTick(tick) => (0, *tick),
+            RunResult::WaitForEvent => (1, 0),
+            RunResult::NoMoreTasks => (2, 0),
+        }
+    }
+}
+
 pub struct LocalExecutor<const N: usize> {
     // Space for tasks to run.
     tasks: [Option<TaskInfo>; N],
-    // Bitmask of the tasks than need to be polled.
+    // Bitmask of tasks than need to be polled.
     ready_mask: AtomicU32,
+    current_task: usize,
 }
 
 impl<const N: usize> Default for LocalExecutor<N> {
@@ -90,6 +112,7 @@ impl<const N: usize> LocalExecutor<N> {
         Self {
             tasks: core::array::from_fn(|_| None),
             ready_mask: AtomicU32::new(0),
+            current_task: usize::MAX,
         }
     }
 
@@ -102,40 +125,57 @@ impl<const N: usize> LocalExecutor<N> {
             });
         }
 
-        while self.run_once(&mut futures) {
-            environment().sleep_if_zero(&self.ready_mask);
+        loop {
+            match self.run_once(&mut futures) {
+                RunResult::WaitForTick(_) => environment().sleep_if_zero(&self.ready_mask),
+                RunResult::WaitForEvent => environment().sleep_if_zero(&self.ready_mask),
+                RunResult::NoMoreTasks => break,
+            }
         }
     }
 
     // Polls all tasks once
-    fn run_once(&mut self, futures: &mut [LocalFutureObj<'_, ()>; N]) -> bool {
-        let mut any_tasks_left = false;
-
+    fn run_once(&mut self, futures: &mut [LocalFutureObj<'_, ()>; N]) -> RunResult {
         let _enter = Enter::new(self);
-        for (future, cell) in futures.iter_mut().zip(self.tasks.iter_mut()) {
-            if let Some(task) = cell {
-                if task.waker.is_task_runnable()
-                    || task
-                        .sleep_until
-                        .get()
-                        .is_some_and(|ticks| ticks <= environment().ticks())
-                {
-                    let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
-                    let mut context = Context::from_waker(&waker);
+        futures
+            .iter_mut()
+            .zip(self.tasks.iter_mut())
+            .enumerate()
+            .map(|(index, (future, cell))| {
+                self.current_task = index;
+                Self::run_task(future, cell)
+            })
+            .min_by_key(RunResult::tuple)
+            .unwrap_or(RunResult::NoMoreTasks)
+    }
 
-                    let result = Pin::new(future).poll(&mut context);
-                    if let Poll::Ready(()) = result {
-                        *cell = None;
-                    }
-                }
+    fn run_task(future: &mut LocalFutureObj<'_, ()>, cell: &mut Option<TaskInfo>) -> RunResult {
+        if let Some(task) = cell {
+            if task.waker.is_task_runnable()
+                || task
+                    .sleep_until
+                    .get()
+                    .is_some_and(|ticks| ticks <= environment().ticks())
+            {
+                let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
+                let mut context = Context::from_waker(&waker);
 
-                if cell.is_some() {
-                    any_tasks_left = true;
+                let result = Pin::new(future).poll(&mut context);
+                if let Poll::Ready(()) = result {
+                    *cell = None;
                 }
             }
         }
 
-        any_tasks_left
+        if let Some(task) = cell {
+            if let Some(tick) = task.sleep_until.get() {
+                RunResult::WaitForTick(tick)
+            } else {
+                RunResult::WaitForEvent
+            }
+        } else {
+            RunResult::NoMoreTasks
+        }
     }
 }
 
@@ -144,13 +184,10 @@ impl<const N: usize> Executor for LocalExecutor<N> {
         Sleep::new(environment().ticks() + duration)
     }
 
-    fn mark_sleep(&self, wake_at: u32, waker: &Waker) {
-        let task = self
-            .tasks
-            .iter()
-            .flatten()
-            .find(|task| (unsafe { Waker::from_raw(task.waker.to_raw_waker()) }).will_wake(waker))
-            .expect("can't find task from waker");
+    fn request_wakeup(&self, wake_at: u32) {
+        let task = self.tasks[self.current_task]
+            .as_ref()
+            .expect("current_task points to finished task");
 
         if task.sleep_until.get().unwrap_or(u32::MAX) > wake_at {
             task.sleep_until.set(Some(wake_at));
@@ -165,7 +202,7 @@ pub fn sleep(duration: u32) -> Sleep {
         .sleep(duration)
 }
 
-pub(crate) fn check_sleep(wake_at: u32, waker: &Waker) -> Poll<()> {
+pub(crate) fn check_sleep(wake_at: u32) -> Poll<()> {
     if environment().ticks() >= wake_at {
         Poll::Ready(())
     } else {
@@ -173,7 +210,7 @@ pub(crate) fn check_sleep(wake_at: u32, waker: &Waker) -> Poll<()> {
         environment()
             .current_executor()
             .expect("check_sleep() called outside of a coroutine")
-            .mark_sleep(wake_at, waker);
+            .request_wakeup(wake_at);
         Poll::Pending
     }
 }
