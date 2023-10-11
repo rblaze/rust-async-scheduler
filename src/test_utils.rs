@@ -13,7 +13,7 @@ thread_local! {
 }
 
 impl Environment for TestEnvironment {
-    fn sleep_if_zero(&self, _mask: &portable_atomic::AtomicU32) {
+    fn wait_for_event_with_timeout(&self, _mask: &portable_atomic::AtomicU32, _tick: Option<u32>) {
         // No-op to allow timer to tick
     }
 

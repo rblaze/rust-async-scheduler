@@ -15,11 +15,16 @@ pub trait Executor {
 }
 
 pub trait Environment {
-    /// If `mask` is zero, sleeps until timer event occurs.
-    fn sleep_if_zero(&self, mask: &AtomicU32);
+    /// Sleeps until `mask` is non-zero or `tick` is reached.
+    /// Early return is okay but causes performance overhead.
+    fn wait_for_event_with_timeout(&self, mask: &AtomicU32, tick: Option<u32>);
+    /// Gets current tick count.
     fn ticks(&self) -> u32;
+    /// Records `executor` as current one, to return from `current_executor()`
     fn enter_executor(&self, executor: &dyn Executor);
+    /// Unregisters current executor.
     fn leave_executor(&self);
+    /// Returns current executor, if any.
     fn current_executor(&self) -> Option<&dyn Executor>;
 }
 
@@ -127,8 +132,12 @@ impl<const N: usize> LocalExecutor<N> {
 
         loop {
             match self.run_once(&mut futures) {
-                RunResult::WaitForTick(_) => environment().sleep_if_zero(&self.ready_mask),
-                RunResult::WaitForEvent => environment().sleep_if_zero(&self.ready_mask),
+                RunResult::WaitForTick(tick) => {
+                    environment().wait_for_event_with_timeout(&self.ready_mask, Some(tick))
+                }
+                RunResult::WaitForEvent => {
+                    environment().wait_for_event_with_timeout(&self.ready_mask, None)
+                }
                 RunResult::NoMoreTasks => break,
             }
         }
