@@ -169,6 +169,9 @@ impl<const N: usize> LocalExecutor<N> {
                 let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
                 let mut context = Context::from_waker(&waker);
 
+                // Let sleep futures update this field.
+                task.sleep_until.set(None);
+
                 let result = Pin::new(future).poll(&mut context);
                 if let Poll::Ready(()) = result {
                     *cell = None;
