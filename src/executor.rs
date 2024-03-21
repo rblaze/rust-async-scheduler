@@ -7,19 +7,20 @@ use futures::task::LocalFutureObj;
 use portable_atomic::AtomicU32;
 
 use crate::sleep::Sleep;
+use crate::time::Ticks;
 use crate::waker::{WakerError, WakerInfo};
 
 pub trait Executor {
-    fn sleep(&self, duration: u32) -> Sleep;
-    fn request_wakeup(&self, wake_at: u32);
+    fn sleep(&self, duration: Ticks) -> Sleep;
+    fn request_wakeup(&self, wake_at: Ticks);
 }
 
 pub trait Environment {
     /// Sleeps until `mask` is non-zero or `tick` is reached.
     /// Early return is okay but causes performance overhead.
-    fn wait_for_event_with_timeout(&self, mask: &AtomicU32, tick: Option<u32>);
+    fn wait_for_event_with_timeout(&self, mask: &AtomicU32, tick: Option<Ticks>);
     /// Gets current tick count.
-    fn ticks(&self) -> u32;
+    fn ticks(&self) -> Ticks;
     /// Records `executor` as current one, to return from `current_executor()`
     fn enter_executor(&self, executor: &dyn Executor);
     /// Unregisters current executor.
@@ -75,12 +76,12 @@ pub enum SpawnError {
 
 struct TaskInfo {
     waker: WakerInfo,
-    sleep_until: Cell<Option<u32>>,
+    sleep_until: Cell<Option<Ticks>>,
 }
 
 enum RunResult {
     /// Wait for wakeup event or specified time
-    WaitForTick(u32),
+    WaitForTick(Ticks),
     /// No active timeouts, wait for wakeup event
     WaitForEvent,
     /// No pending tasks left
@@ -89,11 +90,11 @@ enum RunResult {
 
 impl RunResult {
     /// Map enum to tuple for automatic Eq/Ord
-    fn tuple(&self) -> (u32, u32) {
+    fn tuple(&self) -> (usize, Ticks) {
         match self {
             RunResult::WaitForTick(tick) => (0, *tick),
-            RunResult::WaitForEvent => (1, 0),
-            RunResult::NoMoreTasks => (2, 0),
+            RunResult::WaitForEvent => (1, Ticks::new(0)),
+            RunResult::NoMoreTasks => (2, Ticks::new(0)),
         }
     }
 }
@@ -192,29 +193,29 @@ impl<const N: usize> LocalExecutor<N> {
 }
 
 impl<const N: usize> Executor for LocalExecutor<N> {
-    fn sleep(&self, duration: u32) -> Sleep {
+    fn sleep(&self, duration: Ticks) -> Sleep {
         Sleep::new(environment().ticks() + duration)
     }
 
-    fn request_wakeup(&self, wake_at: u32) {
+    fn request_wakeup(&self, wake_at: Ticks) {
         let task = self.tasks[self.current_task]
             .as_ref()
             .expect("current_task points to finished task");
 
-        if task.sleep_until.get().unwrap_or(u32::MAX) > wake_at {
+        if task.sleep_until.get().unwrap_or(Ticks::MAX) > wake_at {
             task.sleep_until.set(Some(wake_at));
         }
     }
 }
 
-pub fn sleep(duration: u32) -> Sleep {
+pub fn sleep(duration: Ticks) -> Sleep {
     environment()
         .current_executor()
         .expect("sleep() called outside of a coroutine")
         .sleep(duration)
 }
 
-pub(crate) fn check_sleep(wake_at: u32) -> Poll<()> {
+pub(crate) fn check_sleep(wake_at: Ticks) -> Poll<()> {
     if environment().ticks() >= wake_at {
         Poll::Ready(())
     } else {

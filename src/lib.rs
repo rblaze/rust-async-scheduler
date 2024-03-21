@@ -4,6 +4,7 @@ pub mod executor;
 pub mod mailbox;
 mod sleep;
 pub mod sync;
+pub mod time;
 mod waker;
 
 #[cfg(test)]
