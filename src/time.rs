@@ -8,6 +8,10 @@ impl Ticks {
     pub fn new(ticks: u64) -> Self {
         Self(ticks)
     }
+
+    pub fn ticks(&self) -> u64 {
+        self.0
+    }
 }
 
 impl core::fmt::Display for Ticks {
