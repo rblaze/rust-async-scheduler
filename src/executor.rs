@@ -210,6 +210,7 @@ impl<const N: usize> Executor for LocalExecutor<N> {
     }
 }
 
+/// Returns awaitable that pauses execution for `duration`.
 pub fn sleep(duration: Duration) -> Sleep {
     environment()
         .current_executor()
@@ -217,11 +218,12 @@ pub fn sleep(duration: Duration) -> Sleep {
         .sleep(duration)
 }
 
-pub(crate) fn check_sleep(wake_at: Instant) -> Poll<()> {
+/// Schedules wakeup for the current task at `wake_at`.
+pub(crate) fn request_wakeup(wake_at: Instant) -> Poll<()> {
     if environment().ticks() >= wake_at {
         Poll::Ready(())
     } else {
-        // If wake time is more recent than other sleeps in this task, save it.
+        // If wake time is closer than other sleeps in this task, save it.
         environment()
             .current_executor()
             .expect("check_sleep() called outside of a coroutine")
