@@ -7,20 +7,22 @@ use futures::task::LocalFutureObj;
 use portable_atomic::AtomicU32;
 
 use crate::sleep::Sleep;
-use crate::time::Ticks;
+use crate::time::{Duration, Instant};
 use crate::waker::{WakerError, WakerInfo};
 
 pub trait Executor {
-    fn sleep(&self, duration: Ticks) -> Sleep;
-    fn request_wakeup(&self, wake_at: Ticks);
+    /// Returns awaitable that pauses execution for `duration`.
+    fn sleep(&self, duration: Duration) -> Sleep;
+    /// Schedules wakeup for the current task at `wake_at`.
+    fn request_wakeup(&self, wake_at: Instant);
 }
 
 pub trait Environment {
     /// Sleeps until `mask` is non-zero or `tick` is reached.
     /// Early return is okay but causes performance overhead.
-    fn wait_for_event_with_timeout(&self, mask: &AtomicU32, tick: Option<Ticks>);
+    fn wait_for_event_with_deadline(&self, mask: &AtomicU32, tick: Option<Instant>);
     /// Gets current tick count.
-    fn ticks(&self) -> Ticks;
+    fn ticks(&self) -> Instant;
     /// Records `executor` as current one, to return from `current_executor()`
     fn enter_executor(&self, executor: &dyn Executor);
     /// Unregisters current executor.
@@ -76,12 +78,12 @@ pub enum SpawnError {
 
 struct TaskInfo {
     waker: WakerInfo,
-    sleep_until: Cell<Option<Ticks>>,
+    sleep_until: Cell<Option<Instant>>,
 }
 
 enum RunResult {
     /// Wait for wakeup event or specified time
-    WaitForTick(Ticks),
+    WaitForTick(Instant),
     /// No active timeouts, wait for wakeup event
     WaitForEvent,
     /// No pending tasks left
@@ -90,11 +92,11 @@ enum RunResult {
 
 impl RunResult {
     /// Map enum to tuple for automatic Eq/Ord
-    fn tuple(&self) -> (usize, Ticks) {
+    fn tuple(&self) -> (usize, Instant) {
         match self {
             RunResult::WaitForTick(tick) => (0, *tick),
-            RunResult::WaitForEvent => (1, Ticks::new(0)),
-            RunResult::NoMoreTasks => (2, Ticks::new(0)),
+            RunResult::WaitForEvent => (1, Instant::MIN),
+            RunResult::NoMoreTasks => (2, Instant::MIN),
         }
     }
 }
@@ -134,10 +136,10 @@ impl<const N: usize> LocalExecutor<N> {
         loop {
             match self.run_once(&mut futures) {
                 RunResult::WaitForTick(tick) => {
-                    environment().wait_for_event_with_timeout(&self.ready_mask, Some(tick))
+                    environment().wait_for_event_with_deadline(&self.ready_mask, Some(tick))
                 }
                 RunResult::WaitForEvent => {
-                    environment().wait_for_event_with_timeout(&self.ready_mask, None)
+                    environment().wait_for_event_with_deadline(&self.ready_mask, None)
                 }
                 RunResult::NoMoreTasks => break,
             }
@@ -193,29 +195,29 @@ impl<const N: usize> LocalExecutor<N> {
 }
 
 impl<const N: usize> Executor for LocalExecutor<N> {
-    fn sleep(&self, duration: Ticks) -> Sleep {
+    fn sleep(&self, duration: Duration) -> Sleep {
         Sleep::new(environment().ticks() + duration)
     }
 
-    fn request_wakeup(&self, wake_at: Ticks) {
+    fn request_wakeup(&self, wake_at: Instant) {
         let task = self.tasks[self.current_task]
             .as_ref()
             .expect("current_task points to finished task");
 
-        if task.sleep_until.get().unwrap_or(Ticks::MAX) > wake_at {
+        if task.sleep_until.get().unwrap_or(Instant::MAX) > wake_at {
             task.sleep_until.set(Some(wake_at));
         }
     }
 }
 
-pub fn sleep(duration: Ticks) -> Sleep {
+pub fn sleep(duration: Duration) -> Sleep {
     environment()
         .current_executor()
         .expect("sleep() called outside of a coroutine")
         .sleep(duration)
 }
 
-pub(crate) fn check_sleep(wake_at: Ticks) -> Poll<()> {
+pub(crate) fn check_sleep(wake_at: Instant) -> Poll<()> {
     if environment().ticks() >= wake_at {
         Poll::Ready(())
     } else {

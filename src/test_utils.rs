@@ -4,28 +4,28 @@ use std::sync::Once;
 use futures::Future;
 
 use crate::executor::{Environment, LocalExecutor};
-use crate::time::Ticks;
+use crate::time::{Duration, Instant};
 
 pub struct TestEnvironment {}
 
 thread_local! {
-    static TICKS: Cell<Ticks> = Cell::new(Ticks::new(0));
+    static TICKS: Cell<Instant> = Cell::new(Instant::new(0));
     static EXECUTOR: Cell<Option<&'static dyn crate::executor::Executor>> = Cell::new(None);
 }
 
 impl Environment for TestEnvironment {
-    fn wait_for_event_with_timeout(
+    fn wait_for_event_with_deadline(
         &self,
         _mask: &portable_atomic::AtomicU32,
-        _tick: Option<Ticks>,
+        _tick: Option<Instant>,
     ) {
         // No-op to allow timer to tick
     }
 
-    fn ticks(&self) -> Ticks {
+    fn ticks(&self) -> Instant {
         TICKS.with(|t| {
             let ticks = t.get();
-            t.set(ticks + Ticks::new(1));
+            t.set(ticks + Duration::new(1));
             ticks
         })
     }

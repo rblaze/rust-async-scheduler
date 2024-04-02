@@ -3,16 +3,16 @@
 use core::future::Future;
 use core::task::{Context, Poll};
 
-use crate::time::Ticks;
+use crate::time::Instant;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Sleep {
-    wake_at_tick: Ticks,
+    wake_at_tick: Instant,
 }
 
 impl Sleep {
-    pub(crate) fn new(wake_at_tick: Ticks) -> Self {
+    pub(crate) fn new(wake_at_tick: Instant) -> Self {
         Self { wake_at_tick }
     }
 }
@@ -28,14 +28,14 @@ impl Future for Sleep {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::block_on;
-    use crate::time::Ticks;
+    use crate::time::Duration;
 
     #[test]
     fn sleep_and_wake() {
         let v = block_on(async {
             for _ in 0..10 {
                 println!("iter enter");
-                crate::executor::sleep(Ticks::new(10)).await;
+                crate::executor::sleep(Duration::new(10)).await;
                 println!("iter exit");
             }
 
