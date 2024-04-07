@@ -218,6 +218,11 @@ pub fn sleep(duration: Duration) -> Sleep {
         .sleep(duration)
 }
 
+/// Returns current time as provided by environment.
+pub fn now() -> Instant {
+    environment().ticks()
+}
+
 /// Schedules wakeup for the current task at `wake_at`.
 pub(crate) fn request_wakeup(wake_at: Instant) -> Poll<()> {
     if environment().ticks() >= wake_at {
