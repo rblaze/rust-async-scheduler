@@ -91,6 +91,12 @@ impl<T> Future for MailboxFuture<'_, T> {
     }
 }
 
+impl<T> Drop for MailboxFuture<'_, T> {
+    fn drop(&mut self) {
+        critical_section::with(|cs| self.mailbox.waker.borrow(cs).set(None));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::pin::pin;

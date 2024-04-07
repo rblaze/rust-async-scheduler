@@ -86,6 +86,12 @@ impl<T> Future for MailboxFuture<'_, T> {
     }
 }
 
+impl<T> Drop for MailboxFuture<'_, T> {
+    fn drop(&mut self) {
+        self.mailbox.waker.set(None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::pin::pin;
