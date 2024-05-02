@@ -1,9 +1,8 @@
 use core::cell::{Cell, OnceCell};
-use core::future::Future;
-use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use critical_section::Mutex;
 use futures::task::LocalFutureObj;
+use futures::FutureExt;
 use portable_atomic::AtomicU32;
 
 use crate::sleep::Sleep;
@@ -175,7 +174,7 @@ impl<const N: usize> LocalExecutor<N> {
                 // Let sleep futures update this field.
                 task.sleep_until.set(None);
 
-                let result = Pin::new(future).poll(&mut context);
+                let result = future.poll_unpin(&mut context);
                 if let Poll::Ready(()) = result {
                     *cell = None;
                 }
