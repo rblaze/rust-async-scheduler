@@ -6,6 +6,7 @@ mod sleep;
 pub mod sync;
 pub mod time;
 mod waker;
+mod yield_now;
 
 #[cfg(test)]
 mod test_utils;

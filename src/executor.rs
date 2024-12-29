@@ -8,6 +8,7 @@ use portable_atomic::AtomicU32;
 use crate::sleep::Sleep;
 use crate::time::{Duration, Instant};
 use crate::waker::{WakerError, WakerInfo};
+use crate::yield_now::Yield;
 
 pub trait Executor {
     /// Returns awaitable that pauses execution for `duration`.
@@ -207,6 +208,11 @@ impl<const N: usize> Executor for LocalExecutor<N> {
             task.sleep_until.set(Some(wake_at));
         }
     }
+}
+
+/// Returns awaitable that pauses execution and requests immediate rescheduling.
+pub fn yield_now() -> Yield {
+    Yield::new()
 }
 
 /// Returns awaitable that pauses execution for `duration`.
