@@ -57,13 +57,14 @@ impl<T> Mailbox<T> {
     pub async fn read(&self) -> Result<T, Error> {
         critical_section::with(|cs| {
             let waker = self.waker.borrow(cs).take();
-            if let Some(waker) = waker {
-                // Mailbox busy.
-                // Restore waker and return error.
-                self.waker.borrow(cs).set(Some(waker));
-                Err(Error::AlreadyWaiting)
-            } else {
-                Ok(())
+            match waker {
+                Some(waker) => {
+                    // Mailbox busy.
+                    // Restore waker and return error.
+                    self.waker.borrow(cs).set(Some(waker));
+                    Err(Error::AlreadyWaiting)
+                }
+                _ => Ok(()),
             }
         })?;
 

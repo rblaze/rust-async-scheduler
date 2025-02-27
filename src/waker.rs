@@ -48,8 +48,8 @@ impl WakerInfo {
         prev_mask & self.task_mask.get() != 0
     }
 
-    pub unsafe fn wake_task(&self) {
-        let executor_ready_mask = self.executor_ready_mask.as_ref();
+    pub fn wake_task(&self) {
+        let executor_ready_mask = unsafe { self.executor_ready_mask.as_ref() };
         executor_ready_mask.fetch_or(self.task_mask.get(), Ordering::Release);
     }
 }
@@ -102,7 +102,7 @@ mod tests {
             "Task must not be runnable until wake_task()"
         );
 
-        unsafe { waker.wake_task() };
+        waker.wake_task();
         assert_eq!(
             mask.load(Ordering::Acquire),
             default_mask | (1 << task_idx),

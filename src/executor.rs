@@ -1,8 +1,8 @@
 use core::cell::{Cell, OnceCell};
 use core::task::{Context, Poll, Waker};
 use critical_section::Mutex;
-use futures::task::LocalFutureObj;
 use futures::FutureExt;
+use futures::task::LocalFutureObj;
 use portable_atomic::AtomicU32;
 
 use crate::sleep::Sleep;
