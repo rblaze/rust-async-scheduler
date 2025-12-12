@@ -15,7 +15,9 @@ pub enum WakerError {
 // TODO: refcount Wakers and only delete the task when count drops to zero.
 #[derive(Debug)]
 pub struct WakerInfo {
+    // Has one bit set, matching the task number (1 << task_idx)
     task_mask: NonZeroU32,
+    // Pointer to the executor's "tasks ready to run" bits
     executor_ready_mask: NonNull<AtomicU32>,
 }
 
@@ -27,6 +29,7 @@ impl WakerInfo {
             .ok_or(WakerError::TaskIndexOutOfRange)?;
         let task_mask = NonZeroU32::new(mask).ok_or(WakerError::TaskIndexOutOfRange)?;
 
+        // Set task's bit in the executor mask
         executor_ready_mask.fetch_or(task_mask.get(), Ordering::Release);
 
         Ok(Self {
@@ -57,19 +60,23 @@ impl WakerInfo {
 }
 
 const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    // clone()
     |ptr| RawWaker::new(ptr, &WAKER_VTABLE),
+    // wake()
     |ptr| unsafe {
         debug_assert!(!ptr.is_null());
         let waker = &*(ptr as *const WakerInfo);
 
         waker.wake_task();
     },
+    // wake_by_ref()
     |ptr| unsafe {
         debug_assert!(!ptr.is_null());
         let waker = &*(ptr as *const WakerInfo);
 
         waker.wake_task();
     },
+    // drop()
     |_| {},
 );
 
