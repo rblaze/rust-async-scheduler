@@ -166,23 +166,22 @@ impl<const N: usize> LocalExecutor<N> {
     }
 
     fn run_task(future: &mut LocalFutureObj<'_, ()>, cell: &mut Option<TaskInfo>) -> RunResult {
-        if let Some(task) = cell {
-            if task.waker.is_task_runnable()
+        if let Some(task) = cell
+            && (task.waker.is_task_runnable()
                 || task
                     .sleep_until
                     .get()
-                    .is_some_and(|ticks| ticks <= environment().ticks())
-            {
-                let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
-                let mut context = Context::from_waker(&waker);
+                    .is_some_and(|ticks| ticks <= environment().ticks()))
+        {
+            let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
+            let mut context = Context::from_waker(&waker);
 
-                // Let sleep futures update this field.
-                task.sleep_until.set(None);
+            // Let sleep futures update this field.
+            task.sleep_until.set(None);
 
-                let result = future.poll_unpin(&mut context);
-                if let Poll::Ready(()) = result {
-                    *cell = None;
-                }
+            let result = future.poll_unpin(&mut context);
+            if let Poll::Ready(()) = result {
+                *cell = None;
             }
         }
 
