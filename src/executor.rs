@@ -4,6 +4,7 @@ use critical_section::Mutex;
 use futures::FutureExt;
 use futures::task::LocalFutureObj;
 use portable_atomic::AtomicU32;
+use thiserror::Error;
 
 use crate::sleep::Sleep;
 use crate::time::{Duration, Instant};
@@ -33,9 +34,11 @@ pub trait Environment {
 
 static ENV: Mutex<OnceCell<&'static (dyn Environment + Sync)>> = Mutex::new(OnceCell::new());
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum EnvError {
+    #[error("environment already initialized")]
     AlreadyInitialized,
+    #[error("environment not initialized")]
     Uninitialized,
 }
 
@@ -71,8 +74,9 @@ impl Drop for Enter {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum SpawnError {
+    #[error(transparent)]
     Waker(WakerError),
 }
 

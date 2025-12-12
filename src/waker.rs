@@ -2,9 +2,11 @@ use core::num::NonZeroU32;
 use core::ptr::NonNull;
 use core::task::{RawWaker, RawWakerVTable};
 use portable_atomic::{AtomicU32, Ordering};
+use thiserror::Error;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum WakerError {
+    #[error("task index out of range")]
     TaskIndexOutOfRange,
 }
 

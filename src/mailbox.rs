@@ -5,16 +5,19 @@ use core::fmt::Debug;
 use core::future::Future;
 use core::task::{Context, Poll, Waker};
 
+use thiserror::Error;
+
 /// Thread-unsafe mailbox, storing a single value and allowing to wait for it.
 pub struct Mailbox<T> {
     value: Cell<Option<T>>,
     waker: Cell<Option<Waker>>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Error)]
 pub enum Error {
     /// Someone already waiting for this mailbox.
     /// It doesn't support multiple waiters.
+    #[error("mailbox already awaited")]
     AlreadyWaiting,
 }
 
