@@ -80,6 +80,22 @@ impl core::ops::Sub for Duration {
     }
 }
 
+impl core::ops::Mul<i64> for Duration {
+    type Output = Self;
+
+    fn mul(self, rhs: i64) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl core::ops::Div<i64> for Duration {
+    type Output = Self;
+
+    fn div(self, rhs: i64) -> Self::Output {
+        Self(self.0 / rhs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +128,17 @@ mod tests {
         let b = Duration::new(5);
         assert_eq!(a - b, Duration::new(5));
         assert_eq!(b - a, Duration::new(-5));
+    }
+
+    #[test]
+    fn test_duration_mul() {
+        let a = Duration::new(10);
+        assert_eq!(a * 2, Duration::new(20));
+    }
+
+    #[test]
+    fn test_duration_div() {
+        let a = Duration::new(10);
+        assert_eq!(a / 2, Duration::new(5));
     }
 }
