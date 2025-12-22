@@ -1,91 +1,57 @@
-use core::cell::{Cell, OnceCell};
+use core::cell::Cell;
+use core::sync::atomic::Ordering;
 use core::task::{Context, Poll, Waker};
-use critical_section::Mutex;
+
 use futures::FutureExt;
 use futures::task::LocalFutureObj;
-use portable_atomic::AtomicU32;
-use thiserror::Error;
+use portable_atomic::AtomicBool;
 
-use crate::sleep::Sleep;
-use crate::time::{Duration, Instant};
-use crate::waker::{WakerError, WakerInfo};
-use crate::yield_now::Yield;
+use crate::time::Instant;
+use crate::waker::WakerInfo;
 
-pub trait Executor {
-    /// Returns awaitable that pauses execution for `duration`.
-    fn sleep(&self, duration: Duration) -> Sleep;
-    /// Schedules wakeup for the current task at `wake_at`.
-    fn request_wakeup(&self, wake_at: Instant);
-}
-
-pub trait Environment {
-    /// Sleeps until `mask` is non-zero or `tick` is reached.
+pub trait Environment: core::fmt::Debug {
+    /// Sleeps until `event` becomes true or `tick` is reached.
     /// Early return is okay but causes performance overhead.
-    fn wait_for_event_with_deadline(&self, mask: &AtomicU32, tick: Option<Instant>);
+    fn wait_for_event_with_deadline(&self, event: &AtomicBool, tick: Option<Instant>);
     /// Gets current tick count.
     fn ticks(&self) -> Instant;
-    /// Records `executor` as current one, to return from `current_executor()`
-    fn enter_executor(&self, executor: &dyn Executor);
-    /// Unregisters current executor.
-    fn leave_executor(&self);
-    /// Returns current executor, if any.
-    fn current_executor(&self) -> Option<&dyn Executor>;
 }
 
-static ENV: Mutex<OnceCell<&'static (dyn Environment + Sync)>> = Mutex::new(OnceCell::new());
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
-pub enum EnvError {
-    #[error("environment already initialized")]
-    AlreadyInitialized,
-    #[error("environment not initialized")]
-    Uninitialized,
+pub(crate) trait Executor: core::fmt::Debug {
+    /// Returns current time
+    fn current_time(&self) -> Instant;
+    /// Run task at specified time
+    fn wakeup_task_at(&self, task_index: usize, time: Instant) -> Poll<()>;
+    /// Mark task as ready to run
+    fn set_task_runnable(&self, task_index: usize);
 }
 
-/// Sets executor environment.
-/// Must be called before calling run() for any executor
-pub fn set_environment(env: &'static (dyn Environment + Sync)) -> Result<(), EnvError> {
-    critical_section::with(|cs| {
-        ENV.borrow(cs)
-            .set(env)
-            .or(Err(EnvError::AlreadyInitialized))
-    })
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum TaskState {
+    Runnable,
+    Waiting(Option<Instant>),
 }
 
-fn environment() -> &'static (dyn Environment + Sync) {
-    critical_section::with(|cs| ENV.borrow(cs).get().ok_or(EnvError::Uninitialized).copied())
-        .unwrap()
-}
-
-/// enter_executor/leave_executor guard
-struct Enter {}
-
-impl Enter {
-    /// Registers executor with environment and returns guard struct to unregister it.
-    pub fn new(executor: &dyn Executor) -> Self {
-        environment().enter_executor(executor);
-        Self {}
+impl TaskState {
+    fn is_runnable(&self, tick: Instant) -> bool {
+        match self {
+            TaskState::Runnable => true,
+            TaskState::Waiting(Some(expected_tick)) => *expected_tick <= tick,
+            _ => false,
+        }
     }
 }
 
-impl Drop for Enter {
-    fn drop(&mut self) {
-        environment().leave_executor();
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
-pub enum SpawnError {
-    #[error(transparent)]
-    Waker(WakerError),
-}
-
+#[derive(Debug)]
 struct TaskInfo {
     waker: WakerInfo,
-    sleep_until: Cell<Option<Instant>>,
+    state: Cell<TaskState>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum RunResult {
+    /// Run next iteration immediately
+    RunAgain,
     /// Wait for wakeup event or specified time
     WaitForTick(Instant),
     /// No active timeouts, wait for wakeup event
@@ -95,56 +61,51 @@ enum RunResult {
 }
 
 impl RunResult {
-    /// Map enum to tuple for automatic Eq/Ord
-    fn tuple(&self) -> (usize, Instant) {
-        match self {
-            RunResult::WaitForTick(tick) => (0, *tick),
-            RunResult::WaitForEvent => (1, Instant::MIN),
-            RunResult::NoMoreTasks => (2, Instant::MIN),
+    fn from_task_state(state: Option<TaskState>) -> Self {
+        match state {
+            Some(TaskState::Runnable) => RunResult::RunAgain,
+            Some(TaskState::Waiting(Some(tick))) => RunResult::WaitForTick(tick),
+            Some(TaskState::Waiting(None)) => RunResult::WaitForEvent,
+            None => RunResult::NoMoreTasks,
         }
     }
 }
 
-pub struct LocalExecutor<const N: usize> {
+#[derive(Debug)]
+pub struct LocalExecutor<'a, const N: usize> {
+    env: &'a dyn Environment,
     // Space for tasks to run.
     tasks: [Option<TaskInfo>; N],
-    // Bitmask of tasks than need to be polled.
-    ready_mask: AtomicU32,
-    current_task: usize,
+    wakeup_event: AtomicBool,
 }
 
-impl<const N: usize> Default for LocalExecutor<N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: usize> LocalExecutor<N> {
-    pub fn new() -> Self {
+impl<'a, const N: usize> LocalExecutor<'a, N> {
+    pub fn new(env: &'a dyn Environment) -> Self {
         Self {
-            tasks: core::array::from_fn(|_| None),
-            ready_mask: AtomicU32::new(0),
-            current_task: usize::MAX,
+            env,
+            tasks: [const { None }; N],
+            wakeup_event: AtomicBool::new(false),
         }
     }
 
     // Run all futures to completion.
-    pub fn run(&mut self, mut futures: [LocalFutureObj<'_, ()>; N]) {
+    pub fn run(&'a mut self, mut futures: [LocalFutureObj<'_, ()>; N]) {
         for index in 0..N {
             self.tasks[index] = Some(TaskInfo {
-                waker: WakerInfo::new(index, &self.ready_mask).unwrap(),
-                sleep_until: Cell::new(None),
+                waker: WakerInfo::new(index, self as *const _ as *const _),
+                state: Cell::new(TaskState::Runnable),
             });
         }
 
         loop {
             match self.run_once(&mut futures) {
-                RunResult::WaitForTick(tick) => {
-                    environment().wait_for_event_with_deadline(&self.ready_mask, Some(tick))
-                }
-                RunResult::WaitForEvent => {
-                    environment().wait_for_event_with_deadline(&self.ready_mask, None)
-                }
+                RunResult::RunAgain => continue,
+                RunResult::WaitForTick(tick) => self
+                    .env
+                    .wait_for_event_with_deadline(&self.wakeup_event, Some(tick)),
+                RunResult::WaitForEvent => self
+                    .env
+                    .wait_for_event_with_deadline(&self.wakeup_event, None),
                 RunResult::NoMoreTasks => break,
             }
         }
@@ -152,96 +113,74 @@ impl<const N: usize> LocalExecutor<N> {
 
     // Polls all tasks once
     fn run_once(&mut self, futures: &mut [LocalFutureObj<'_, ()>; N]) -> RunResult {
-        let _enter = Enter::new(self);
         futures
             .iter_mut()
-            .zip(self.tasks.iter_mut())
             .enumerate()
-            .map(|(index, (future, cell))| {
-                self.current_task = index;
-                Self::run_task(future, cell)
-            })
-            .min_by_key(RunResult::tuple)
+            .map(|(task_index, future)| self.run_task(task_index, future))
+            .min()
             .unwrap_or(RunResult::NoMoreTasks)
     }
 
-    fn run_task(future: &mut LocalFutureObj<'_, ()>, cell: &mut Option<TaskInfo>) -> RunResult {
-        if let Some(task) = cell
-            && (task.waker.is_task_runnable()
-                || task
-                    .sleep_until
-                    .get()
-                    .is_some_and(|ticks| ticks <= environment().ticks()))
+    fn run_task(&mut self, task_index: usize, future: &mut LocalFutureObj<'_, ()>) -> RunResult {
+        let t = &mut self.tasks[task_index];
+
+        if let Some(task) = t
+            && task.state.get().is_runnable(self.env.ticks())
         {
             let waker = unsafe { Waker::from_raw(task.waker.to_raw_waker()) };
             let mut context = Context::from_waker(&waker);
 
-            // Let sleep futures update this field.
-            task.sleep_until.set(None);
+            // Let sleep and yield futures update this field.
+            task.state.set(TaskState::Waiting(None));
 
-            let result = future.poll_unpin(&mut context);
-            if let Poll::Ready(()) = result {
-                *cell = None;
+            if future.poll_unpin(&mut context).is_ready() {
+                // Task finished
+                *t = None;
             }
         }
 
-        if let Some(task) = cell {
-            if let Some(tick) = task.sleep_until.get() {
-                RunResult::WaitForTick(tick)
-            } else {
-                RunResult::WaitForEvent
-            }
+        RunResult::from_task_state(t.as_ref().map(|task| task.state.get()))
+    }
+}
+
+impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {
+    fn current_time(&self) -> Instant {
+        self.env.ticks()
+    }
+
+    fn wakeup_task_at(&self, task_index: usize, time: Instant) -> Poll<()> {
+        debug_assert!(task_index < N);
+
+        if self.env.ticks() <= time {
+            Poll::Ready(())
         } else {
-            RunResult::NoMoreTasks
+            // This function is supposed to be called only for currently running task.
+            self.tasks[task_index]
+                .as_ref()
+                .expect("wakeup_task_at() called for finished task")
+                .state
+                .update(|state| {
+                    // Check if the task is already scheduled to wakeup at earlier time.
+                    if state.is_runnable(time) {
+                        state
+                    } else {
+                        TaskState::Waiting(Some(time))
+                    }
+                });
+
+            Poll::Pending
         }
     }
-}
 
-impl<const N: usize> Executor for LocalExecutor<N> {
-    fn sleep(&self, duration: Duration) -> Sleep {
-        Sleep::new(environment().ticks() + duration)
-    }
-
-    fn request_wakeup(&self, wake_at: Instant) {
-        let task = self.tasks[self.current_task]
+    fn set_task_runnable(&self, task_index: usize) {
+        debug_assert!(task_index < N);
+        self.tasks[task_index]
             .as_ref()
-            .expect("current_task points to finished task");
+            .expect("set_task_runnable() called for finished task")
+            .state
+            .set(TaskState::Runnable);
 
-        if task.sleep_until.get().unwrap_or(Instant::MAX) > wake_at {
-            task.sleep_until.set(Some(wake_at));
-        }
-    }
-}
-
-/// Returns awaitable that pauses execution and requests immediate rescheduling.
-pub fn yield_now() -> Yield {
-    Yield::new()
-}
-
-/// Returns awaitable that pauses execution for `duration`.
-pub fn sleep(duration: Duration) -> Sleep {
-    environment()
-        .current_executor()
-        .expect("sleep() called outside of a coroutine")
-        .sleep(duration)
-}
-
-/// Returns current time as provided by environment.
-pub fn now() -> Instant {
-    environment().ticks()
-}
-
-/// Schedules wakeup for the current task at `wake_at`.
-pub(crate) fn request_wakeup(wake_at: Instant) -> Poll<()> {
-    if environment().ticks() >= wake_at {
-        Poll::Ready(())
-    } else {
-        // If wake time is closer than other sleeps in this task, save it.
-        environment()
-            .current_executor()
-            .expect("check_sleep() called outside of a coroutine")
-            .request_wakeup(wake_at);
-        Poll::Pending
+        self.wakeup_event.store(true, Ordering::Release);
     }
 }
 
@@ -249,7 +188,7 @@ pub(crate) fn request_wakeup(wake_at: Instant) -> Poll<()> {
 mod tests {
     use core::pin::pin;
 
-    use crate::test_utils::setup;
+    use crate::test_utils::TestEnvironment;
 
     use super::*;
     use futures::task::LocalFutureObj;
@@ -264,13 +203,13 @@ mod tests {
 
     #[test]
     fn test_spawn() {
-        setup();
         let mut v = 0;
         {
+            let env = TestEnvironment::new();
             let mut f = pin!(side_effect_add(1, 2, &mut v));
             let fo = LocalFutureObj::new(&mut f);
 
-            LocalExecutor::new().run([fo]);
+            LocalExecutor::new(&env).run([fo]);
         }
         // Check that task was actually run
         assert_eq!(v, 3);

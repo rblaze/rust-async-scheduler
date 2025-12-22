@@ -20,8 +20,10 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        crate::executor::request_wakeup(self.wake_at_tick)
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let info = crate::waker::from_waker(cx.waker());
+        info.executor()
+            .wakeup_task_at(info.task_index(), self.wake_at_tick)
     }
 }
 
@@ -35,7 +37,7 @@ mod tests {
         let v = block_on(async {
             for _ in 0..10 {
                 println!("iter enter");
-                crate::executor::sleep(Duration::new(10)).await;
+                crate::sleep(Duration::new(10)).await;
                 println!("iter exit");
             }
 

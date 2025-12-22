@@ -107,7 +107,7 @@ mod tests {
 
     use super::*;
     use crate::executor::LocalExecutor;
-    use crate::test_utils::{assign, block_on};
+    use crate::test_utils::{TestEnvironment, block_on};
 
     async fn post_and_read<T, U>(mbox1: &Mailbox<T>, value: T, mbox2: &Mailbox<U>) -> U {
         mbox1.post(value);
@@ -165,13 +165,18 @@ mod tests {
             let mbox1 = Mailbox::<i32>::new();
             let mbox2 = Mailbox::<&'static str>::new();
 
-            let mut f1 = pin!(assign(&mut u, read_and_post(&mbox1, &mbox2, "hello")));
+            let mut f1 = pin!(async {
+                u = read_and_post(&mbox1, &mbox2, "hello").await;
+            });
             let fo1 = LocalFutureObj::new(&mut f1);
 
-            let mut f2 = pin!(assign(&mut t, post_and_read(&mbox1, 42, &mbox2)));
+            let mut f2 = pin!(async {
+                t = post_and_read(&mbox1, 42, &mbox2).await;
+            });
             let fo2 = LocalFutureObj::new(&mut f2);
 
-            LocalExecutor::new().run([fo1, fo2]);
+            let env = TestEnvironment::new();
+            LocalExecutor::new(&env).run([fo1, fo2]);
         }
 
         assert_eq!(t, "hello");
@@ -183,12 +188,13 @@ mod tests {
         let mbox = Mailbox::<i32>::new();
 
         let (t, u, w) = block_on(async {
-            join!(
+            Some(join!(
                 async { mbox.read().await },
                 async { mbox.read().await },
                 async { mbox.post(42) }
-            )
-        });
+            ))
+        })
+        .expect("Coroutine returned None");
 
         assert_eq!(t, Ok(42));
         assert_eq!(u, Err(Error::AlreadyWaiting));

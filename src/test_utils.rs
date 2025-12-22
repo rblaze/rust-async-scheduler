@@ -1,88 +1,49 @@
-use core::{cell::Cell, mem::MaybeUninit};
-use std::sync::Once;
+use std::cell::Cell;
+use std::default::Default;
 
 use futures::Future;
+use portable_atomic::AtomicBool;
 
 use crate::executor::{Environment, LocalExecutor};
 use crate::time::{Duration, Instant};
 
-pub struct TestEnvironment {}
+#[derive(Debug)]
+pub struct TestEnvironment {
+    tick: Cell<Instant>,
+}
 
-thread_local! {
-    static TICKS: Cell<Instant> = Cell::new(Instant::new(0));
-    static EXECUTOR: Cell<Option<&'static dyn crate::executor::Executor>> = Cell::new(None);
+impl TestEnvironment {
+    pub fn new() -> Self {
+        Self {
+            tick: Cell::new(Instant::new(0)),
+        }
+    }
 }
 
 impl Environment for TestEnvironment {
-    fn wait_for_event_with_deadline(
-        &self,
-        _mask: &portable_atomic::AtomicU32,
-        _tick: Option<Instant>,
-    ) {
+    fn wait_for_event_with_deadline(&self, _event: &AtomicBool, _tick: Option<Instant>) {
         // No-op to allow timer to tick
     }
 
     fn ticks(&self) -> Instant {
-        TICKS.with(|t| {
-            let ticks = t.get();
-            t.set(ticks + Duration::new(1));
-            ticks
-        })
-    }
-
-    fn enter_executor(&self, executor: &dyn crate::executor::Executor) {
-        EXECUTOR.with(|cell| {
-            if cell.get().is_some() {
-                panic!("double-entering executor");
-            }
-
-            let r = unsafe {
-                core::mem::transmute::<
-                    &dyn crate::executor::Executor,
-                    &'static dyn crate::executor::Executor,
-                >(executor)
-            };
-            cell.set(Some(r));
-        });
-    }
-
-    fn leave_executor(&self) {
-        EXECUTOR.with(|cell| {
-            cell.get().expect("leaving executor without entering");
-            cell.set(None);
-        });
-    }
-
-    fn current_executor(&self) -> Option<&dyn crate::executor::Executor> {
-        EXECUTOR.with(|cell| cell.get())
+        let now = self.tick.get();
+        self.tick.set(now + Duration::new(1));
+        now
     }
 }
 
-static TESTENV: TestEnvironment = TestEnvironment {};
-static SETUP: Once = Once::new();
+pub fn block_on<T: Default>(future: impl Future<Output = T>) -> T {
+    let mut ret: T = T::default();
 
-pub fn setup() {
-    SETUP.call_once(|| {
-        let _ = crate::executor::set_environment(&TESTENV);
-    });
-}
-
-pub async fn assign<T, F: Future<Output = T>>(dest: &mut T, src: F) {
-    *dest = src.await;
-}
-
-async fn write<T, F: Future<Output = T>>(dest: &mut MaybeUninit<T>, src: F) {
-    dest.write(src.await);
-}
-
-pub fn block_on<T>(future: impl Future<Output = T>) -> T {
-    let _ = setup();
-    let mut ret: MaybeUninit<T> = MaybeUninit::uninit();
     {
-        let f = core::pin::pin!(write(&mut ret, future));
+        let env = TestEnvironment::new();
+        let f = core::pin::pin!(async {
+            ret = future.await;
+        });
         let fo = futures::task::LocalFutureObj::new(f);
 
-        LocalExecutor::new().run([fo]);
+        LocalExecutor::new(&env).run([fo]);
     }
-    unsafe { ret.assume_init() }
+
+    ret
 }
