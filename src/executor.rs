@@ -113,6 +113,9 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
 
     // Polls all tasks once
     fn run_once(&mut self, futures: &mut [LocalFutureObj<'_, ()>; N]) -> RunResult {
+        // Clear wakeup flag, it already activated this loop.
+        self.wakeup_event.store(false, Ordering::Release);
+
         futures
             .iter_mut()
             .enumerate()
