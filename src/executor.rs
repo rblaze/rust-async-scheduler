@@ -154,7 +154,7 @@ impl<'a, const N: usize> Executor for LocalExecutor<'a, N> {
     fn wakeup_task_at(&self, task_index: usize, time: Instant) -> Poll<()> {
         debug_assert!(task_index < N);
 
-        if self.env.ticks() <= time {
+        if self.env.ticks() >= time {
             Poll::Ready(())
         } else {
             // This function is supposed to be called only for currently running task.

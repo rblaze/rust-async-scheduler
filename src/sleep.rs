@@ -29,21 +29,32 @@ impl Future for Sleep {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::block_on;
-    use crate::time::Duration;
+    use std::pin::pin;
+
+    use futures::task::LocalFutureObj;
+
+    use crate::executor::LocalExecutor;
+    use crate::test_utils::TestEnvironment;
+    use crate::time::{Duration, Instant};
 
     #[test]
     fn sleep_and_wake() {
-        let v = block_on(async {
-            for _ in 0..10 {
-                println!("iter enter");
-                crate::sleep(Duration::new(10)).await;
-                println!("iter exit");
-            }
+        let env = TestEnvironment::new();
+        let mut f = pin!(async {
+            let mut start_tick = Instant::new(0);
 
-            42
+            for _ in 0..10 {
+                crate::sleep(Duration::new(10)).await;
+
+                let now = env.current_tick();
+                println!("sleep enter {}, exit {}", start_tick, now);
+                assert!(now - start_tick >= Duration::new(10));
+                start_tick = now;
+            }
         });
 
-        assert_eq!(v, 42);
+        let fo = LocalFutureObj::new(&mut f);
+
+        LocalExecutor::new(&env).run([fo]);
     }
 }

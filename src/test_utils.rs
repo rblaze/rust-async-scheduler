@@ -8,7 +8,7 @@ use crate::executor::{Environment, LocalExecutor};
 use crate::time::{Duration, Instant};
 
 #[derive(Debug)]
-pub struct TestEnvironment {
+pub(crate) struct TestEnvironment {
     tick: Cell<Instant>,
 }
 
@@ -17,6 +17,10 @@ impl TestEnvironment {
         Self {
             tick: Cell::new(Instant::new(0)),
         }
+    }
+
+    pub fn current_tick(&self) -> Instant {
+        self.tick.get()
     }
 }
 
