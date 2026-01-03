@@ -72,6 +72,23 @@ impl<T> Mailbox<T> {
 
         Ok(fut.await)
     }
+
+    /// Reads the value from the mailbox without waiting.
+    /// If there is no posted value, returns None.
+    pub fn try_read(&self) -> Result<Option<T>, Error> {
+        critical_section::with(|cs| {
+            let waker = self.waker.borrow(cs).take();
+            match waker {
+                None => Ok(self.value.borrow(cs).take()),
+                Some(_) => {
+                    // Mailbox busy.
+                    // Restore waker and return error.
+                    self.waker.borrow(cs).set(waker);
+                    Err(Error::AlreadyWaiting)
+                }
+            }
+        })
+    }
 }
 
 struct MailboxFuture<'a, T> {
@@ -135,6 +152,22 @@ mod tests {
 
         assert_eq!(t, "hello");
         assert_eq!(u, 42);
+    }
+
+    #[test]
+    fn try_read() {
+        let mbox1 = Mailbox::<i32>::new();
+
+        let (before, after) = block_on(async {
+            let before = mbox1.try_read().unwrap();
+            mbox1.post(42);
+            let after = mbox1.try_read().unwrap();
+
+            (before, after)
+        });
+
+        assert_eq!(before, None);
+        assert_eq!(after, Some(42));
     }
 
     #[test]
