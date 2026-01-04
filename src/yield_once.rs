@@ -37,7 +37,7 @@ mod tests {
         let v = block_on(async {
             for _ in 0..10 {
                 println!("iter enter");
-                crate::yield_executor().await;
+                crate::yield_once().await;
                 println!("iter exit");
             }
 

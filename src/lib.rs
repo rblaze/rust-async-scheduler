@@ -8,7 +8,7 @@ mod sleep;
 pub mod sync;
 pub mod time;
 mod waker;
-mod yield_now;
+mod yield_once;
 
 // Implementation constraints:
 // * tasks are bound to the executor when run is called and can't migrate to other executors
@@ -16,8 +16,8 @@ mod yield_now;
 // * number of tasks is small and running through the entire list on each iteration is okay
 
 /// Reschedules current task for the next executor run.
-pub async fn yield_executor() {
-    yield_now::Yield::new().await
+pub async fn yield_once() {
+    yield_once::Yield::new().await
 }
 
 /// Returns awaitable that pauses execution for `duration`.
