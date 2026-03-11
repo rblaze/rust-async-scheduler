@@ -89,10 +89,14 @@ impl<'a, const N: usize> LocalExecutor<'a, N> {
     }
 
     // Run all futures to completion.
-    pub fn run(&'a mut self, mut futures: [LocalFutureObj<'_, ()>; N]) {
+    pub fn run(mut self, mut futures: [LocalFutureObj<'_, ()>; N]) {
         for index in 0..N {
             self.tasks[index] = Some(TaskInfo {
-                waker: WakerInfo::new(index, self as *const _ as *const _),
+                waker: WakerInfo::new(index, unsafe {
+                    core::mem::transmute::<*const dyn Executor, *const dyn Executor>(
+                        &self as *const dyn Executor,
+                    )
+                }),
                 state: Cell::new(TaskState::Runnable),
             });
         }
